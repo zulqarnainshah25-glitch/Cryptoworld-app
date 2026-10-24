@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <radialGradient id="bgGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#151a28"/>
+      <stop offset="100%" stop-color="#0b0f19"/>
+    </radialGradient>
+    <linearGradient id="cyanGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00d2ff"/>
+      <stop offset="100%" stop-color="#0066ff"/>
+    </linearGradient>
+    <linearGradient id="greenGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#00ff88"/>
+      <stop offset="100%" stop-color="#009944"/>
+    </linearGradient>
+    <linearGradient id="redGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ff4d4d"/>
+      <stop offset="100%" stop-color="#cc1111"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="110" fill="url(#bgGlow)"/>
+  <circle cx="256" cy="256" r="210" fill="none" stroke="#232b3e" stroke-width="6"/>
+  <circle cx="256" cy="256" r="200" fill="none" stroke="url(#cyanGrad)" stroke-width="4" stroke-dasharray="16 10"/>
+  
+  <!-- Candlesticks -->
+  <!-- Left Red Down -->
+  <line x1="160" y1="180" x2="160" y2="340" stroke="#ff4d4d" stroke-width="4"/>
+  <rect x="142" y="210" width="36" height="90" rx="4" fill="url(#redGrad)"/>
+
+  <!-- Middle Green Up -->
+  <line x1="256" y1="140" x2="256" y2="360" stroke="#00ff88" stroke-width="4"/>
+  <rect x="238" y="170" width="36" height="130" rx="4" fill="url(#greenGrad)"/>
+
+  <!-- Right Cyan Strong Up -->
+  <line x1="352" y1="110" x2="352" y2="330" stroke="#00d2ff" stroke-width="4"/>
+  <rect x="334" y="130" width="36" height="150" rx="4" fill="url(#cyanGrad)"/>
+
+  <!-- Signal Wave Accent -->
+  <path d="M120 380 Q 200 420, 256 370 T 392 340" fill="none" stroke="#00d2ff" stroke-width="6" stroke-linecap="round"/>
+  <circle cx="392" cy="340" r="8" fill="#00ff88"/>
+</svg>

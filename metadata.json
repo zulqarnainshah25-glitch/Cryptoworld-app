@@ -1,0 +1,6 @@
+{
+  "name": "CryptoWorld - AI Crypto Signals",
+  "description": "Pakistan ka pehla AI-powered crypto signal app with real-time Binance data, multi-timeframe analysis, and trading signals.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

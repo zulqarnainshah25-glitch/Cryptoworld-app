@@ -1,0 +1,9 @@
+{
+  "appId": "vip.cryptoworld.app",
+  "appName": "CryptoWorld AI",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https",
+    "cleartext": true
+  }
+}
