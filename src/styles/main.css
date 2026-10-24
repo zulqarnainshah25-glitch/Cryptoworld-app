@@ -58,7 +58,7 @@ body {
   top: 0;
   left: 0;
   right: 0;
-  height: var(--header-height);
+  min-height: var(--header-height);
   background-color: rgba(15, 20, 32, 0.95);
   backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--border-color);
@@ -67,6 +67,7 @@ body {
   justify-content: space-between;
   padding: 0 16px;
   z-index: 100;
+  flex-wrap: wrap;
 }
 
 .header-left, .header-right {
@@ -255,7 +256,7 @@ body {
   gap: 4px;
 }
 
-.nav-link {
+.nav-link, button.nav-link {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -267,18 +268,23 @@ body {
   font-weight: 500;
   transition: all 0.2s ease;
   border: 1px solid transparent;
+  background: transparent !important;
+  width: 100%;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
 }
 
-.nav-link:hover, .nav-link.active {
+.nav-link:hover, button.nav-link:hover {
   color: #ffffff;
-  background: var(--bg-card);
-  border-color: var(--border-color);
+  background: rgba(255, 255, 255, 0.05) !important;
+  border-color: rgba(255, 255, 255, 0.08);
 }
 
-.nav-link.active {
-  color: var(--accent-cyan);
-  border-color: rgba(0, 210, 255, 0.3);
-  background: rgba(0, 210, 255, 0.05);
+.nav-link.active, button.nav-link.active {
+  color: var(--accent-cyan) !important;
+  border-color: rgba(0, 210, 255, 0.3) !important;
+  background: rgba(0, 210, 255, 0.08) !important;
 }
 
 .nav-icon {
@@ -297,6 +303,7 @@ body {
 .app-main {
   margin-top: var(--header-height);
   padding: 16px;
+  padding-bottom: 120px;
   max-width: 1200px;
   margin-left: auto;
   margin-right: auto;
@@ -357,6 +364,118 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+/* Account Profile Card & Controls */
+.account-profile-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+
+.account-user-info {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.account-avatar {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #00d2ff, #0066ff);
+  color: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 900;
+  font-size: 1.4rem;
+  box-shadow: 0 4px 15px rgba(0, 210, 255, 0.4);
+  flex-shrink: 0;
+}
+
+.account-badge-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.account-username {
+  font-size: 1.25rem;
+  font-weight: 800;
+  color: #fff;
+  word-break: break-all;
+}
+
+.account-actions-wrap {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+/* Account Quota 3-Column Strip */
+.account-quota-grid {
+  background: #0e1320;
+  padding: 14px;
+  border-radius: 10px;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr auto 1fr;
+  align-items: center;
+  text-align: center;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  gap: 6px;
+}
+
+.account-quota-col {
+  padding: 4px;
+  min-width: 0;
+}
+
+.account-quota-label {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.account-quota-value {
+  font-size: 1.5rem;
+  font-weight: 800;
+  margin-top: 2px;
+}
+
+.account-quota-value.green {
+  color: var(--accent-green);
+}
+
+.account-quota-value.cyan {
+  color: var(--accent-cyan);
+}
+
+.account-quota-value.sheet-status {
+  font-size: 0.95rem;
+  font-weight: 700;
+  margin-top: 6px;
+}
+
+.account-quota-value.sheet-status.connected {
+  color: #00e676;
+}
+
+.account-quota-value.sheet-status.guest {
+  color: #ffb300;
+}
+
+.account-quota-divider {
+  width: 1px;
+  height: 40px;
+  background: var(--border-color);
 }
 
 .badge-quota {
@@ -1151,19 +1270,104 @@ select.app-select:focus {
   to { transform: translateX(0); opacity: 1; }
 }
 
+/* Account Tab Component Classes */
+.account-profile-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+
+.account-user-info {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.account-badge-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.account-actions-wrap {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.account-quota-grid {
+  background: #0e1320;
+  padding: 14px;
+  border-radius: 10px;
+  display: flex;
+  justify-content: space-around;
+  text-align: center;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.account-quota-col {
+  text-align: center;
+}
+
+.account-quota-label {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.account-quota-value {
+  font-size: 1.6rem;
+  font-weight: 800;
+  color: var(--accent-cyan);
+}
+
+.account-quota-value.green {
+  color: var(--accent-green);
+}
+
+.account-quota-divider {
+  border-left: 1px solid var(--border-color);
+}
+
 /* Responsive adjustments */
 @media (max-width: 640px) {
   .app-header {
-    padding: 0 10px;
-    height: 56px;
+    padding: 4px 10px !important;
+    height: auto !important;
+    min-height: 56px !important;
+    flex-wrap: wrap !important;
+    gap: 4px !important;
   }
   .header-left {
-    gap: 6px;
-    min-width: 0;
+    gap: 6px !important;
+    min-width: 0 !important;
+    flex: 1 1 auto !important;
   }
   .header-right {
-    gap: 6px;
-    flex-shrink: 0;
+    gap: 4px !important;
+    flex-shrink: 0 !important;
+    display: flex !important;
+    align-items: center !important;
+    flex-wrap: nowrap !important;
+  }
+  .header-right .btn-secondary,
+  .header-right button {
+    padding: 5px 8px !important;
+    font-size: 0.74rem !important;
+    white-space: nowrap !important;
+    border-radius: 6px !important;
+    gap: 4px !important;
+    flex-shrink: 0 !important;
+    max-width: 140px;
+  }
+  .header-right .btn-secondary span,
+  .header-right button span {
+    max-width: 85px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: inline-block;
   }
   .logo-badge {
     gap: 6px;
@@ -1180,14 +1384,14 @@ select.app-select:focus {
     display: none; /* Hide 'AI PRO' tag in top header on mobile to prevent overflow */
   }
   .btn-icon {
-    width: 32px;
-    height: 32px;
+    width: 32px !important;
+    height: 32px !important;
     font-size: 0.95rem;
-    flex-shrink: 0;
+    flex-shrink: 0 !important;
   }
   .btn-icon svg {
-    width: 15px;
-    height: 15px;
+    width: 15px !important;
+    height: 15px !important;
   }
   #authBtnHeader {
     padding: 5px 9px;
@@ -1202,8 +1406,114 @@ select.app-select:focus {
     height: 13px;
   }
   .app-main {
-    padding: 10px;
+    padding: 10px !important;
     padding-top: 66px !important;
+    padding-bottom: 120px !important;
+  }
+
+  /* User Info Bar & Account Tab Mobile Fixes */
+  .user-panel-bar {
+    grid-template-columns: 1fr !important;
+    gap: 8px !important;
+    padding: 10px 12px !important;
+  }
+  .account-profile-header {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 12px !important;
+  }
+  .account-user-info {
+    width: 100% !important;
+  }
+  .account-badge-wrap {
+    flex-wrap: wrap !important;
+    gap: 6px !important;
+  }
+  .sheet-verified-badge {
+    white-space: normal !important;
+    word-break: break-word !important;
+    display: inline-flex !important;
+    line-height: 1.2 !important;
+    padding: 3px 6px !important;
+  }
+  .account-actions-wrap {
+    width: 100% !important;
+    justify-content: flex-start !important;
+  }
+  .account-actions-wrap button {
+    flex: 1 !important;
+  }
+
+  /* Account Quota 3 Columns Stacked View */
+  .account-quota-grid {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 8px !important;
+    padding: 10px !important;
+  }
+  .account-quota-divider {
+    display: none !important;
+  }
+  .account-quota-col {
+    display: flex !important;
+    justify-content: space-between !important;
+    align-items: center !important;
+    padding: 8px 10px !important;
+    background: rgba(255, 255, 255, 0.02) !important;
+    border-radius: 8px !important;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05) !important;
+  }
+  .account-quota-label {
+    font-size: 0.76rem !important;
+    white-space: normal !important;
+    text-align: left !important;
+  }
+  .account-quota-value {
+    font-size: 1.25rem !important;
+    margin-top: 0 !important;
+    text-align: right !important;
+  }
+  .account-quota-value.sheet-status {
+    font-size: 0.85rem !important;
+    margin-top: 0 !important;
+  }
+
+  /* VIP Plans & Modal Card Mobile Fixes */
+  .modal-card {
+    width: 95% !important;
+    max-width: 95% !important;
+    padding: 18px 14px !important;
+    margin: 10px auto !important;
+    border-radius: 12px !important;
+  }
+  .plans-grid {
+    grid-template-columns: 1fr !important;
+    gap: 10px !important;
+  }
+  .plan-card {
+    padding: 12px !important;
+  }
+  .plan-signals {
+    font-size: 1.15rem !important;
+    margin: 6px 0 !important;
+  }
+  .plan-features {
+    font-size: 0.74rem !important;
+    margin-bottom: 10px !important;
+    line-height: 1.4 !important;
+  }
+  .modal-card button,
+  .modal-card .btn-primary,
+  .modal-card .btn-secondary,
+  .plan-card .btn-primary,
+  .plan-card .btn-secondary {
+    padding: 9px 12px !important;
+    font-size: 0.82rem !important;
+  }
+  .modal-close-btn {
+    top: 10px !important;
+    right: 10px !important;
+    font-size: 1.3rem !important;
   }
   .controls-bar {
     flex-direction: column;

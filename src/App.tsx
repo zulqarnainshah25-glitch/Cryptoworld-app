@@ -3202,13 +3202,13 @@ export default function App() {
         {activeTab === 'account' && (
           <div className="tab-pane active">
             <div className="material-card">
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '14px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
-                  <div style={{ width: '52px', height: '52px', borderRadius: '50%', background: 'linear-gradient(135deg, #00d2ff, #0066ff)', color: '#000', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 900, fontSize: '1.4rem', boxShadow: '0 4px 15px rgba(0, 210, 255, 0.4)' }}>
+              <div className="account-profile-header">
+                <div className="account-user-info">
+                  <div style={{ width: '52px', height: '52px', borderRadius: '50%', background: 'linear-gradient(135deg, #00d2ff, #0066ff)', color: '#000', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 900, fontSize: '1.4rem', boxShadow: '0 4px 15px rgba(0, 210, 255, 0.4)', flexShrink: 0 }}>
                     {(user?.username || 'G').charAt(0).toUpperCase()}
                   </div>
                   <div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <div className="account-badge-wrap">
                       <span style={{ fontSize: '1.25rem', fontWeight: 800, color: '#fff' }}>{user?.username.toUpperCase() || 'GUEST'}</span>
                       <span className={`badge-plan ${(user?.plan || 'FREE').toLowerCase()}`}>{user?.plan || 'FREE'}</span>
                       {user && user.isSheetVerified && (
@@ -3223,7 +3223,7 @@ export default function App() {
                   </div>
                 </div>
 
-                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                <div className="account-actions-wrap">
                   {user ? (
                     <>
                       <button
@@ -3250,7 +3250,7 @@ export default function App() {
 
             {/* Google Sheet Live Quota Box */}
             <div className="material-card">
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px', flexWrap: 'wrap', gap: '8px' }}>
                 <div>
                   <h3 className="card-title" style={{ marginBottom: '2px' }}>
                     <Database size={16} color="#00e5ff" style={{ display: 'inline', marginRight: '6px' }} />
@@ -3268,24 +3268,24 @@ export default function App() {
                 </button>
               </div>
 
-              <div style={{ background: '#0e1320', padding: '14px', borderRadius: '10px', display: 'flex', justifyContent: 'space-around', textAlign: 'center', border: '1px solid rgba(255, 255, 255, 0.05)' }}>
-                <div>
-                  <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Today's Remaining</div>
-                  <div style={{ fontSize: '1.6rem', fontWeight: 800, color: 'var(--accent-green)' }}>
+              <div className="account-quota-grid">
+                <div className="account-quota-col">
+                  <div className="account-quota-label">Today's Remaining</div>
+                  <div className="account-quota-value green">
                     {user?.dailyQuotaLeft.toFixed(2)}
                   </div>
                 </div>
-                <div style={{ borderLeft: '1px solid var(--border-color)' }} />
-                <div>
-                  <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Daily Base Quota</div>
-                  <div style={{ fontSize: '1.6rem', fontWeight: 800, color: 'var(--accent-cyan)' }}>
+                <div className="account-quota-divider" />
+                <div className="account-quota-col">
+                  <div className="account-quota-label">Daily Base Quota</div>
+                  <div className="account-quota-value">
                     {user?.planBaseQuota || 1}
                   </div>
                 </div>
-                <div style={{ borderLeft: '1px solid var(--border-color)' }} />
-                <div>
-                  <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Google Sheet Status</div>
-                  <div style={{ fontSize: '1rem', fontWeight: 700, color: user?.isSheetVerified ? '#00e676' : '#ffb300', marginTop: '6px' }}>
+                <div className="account-quota-divider" />
+                <div className="account-quota-col">
+                  <div className="account-quota-label">Google Sheet Status</div>
+                  <div className="account-quota-value sheet-status" style={{ color: user?.isSheetVerified ? '#00e676' : '#ffb300' }}>
                     {user?.isSheetVerified ? '✔ Connected' : 'Guest Mode'}
                   </div>
                 </div>
@@ -4495,7 +4495,6 @@ export default function App() {
           </div>
         </div>
       )}
-
-    </>
+      </>
   );
 }
