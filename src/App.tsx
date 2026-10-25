@@ -40,7 +40,7 @@ import {
 // -------------------------------------------------------------
 // CONFIGURATION & CONSTANTS
 // -------------------------------------------------------------
-const CURRENT_APP_VERSION = '1.0.1';
+const CURRENT_APP_VERSION = '1.0.2';
 
 const BACKEND_CONFIG = {
   gasUrl: 'https://script.google.com/macros/s/AKfycbzxKNv2JGtgAbLohzkvTwN5it7Xl3iKSKb6RK228k7JQxUnl-OPPKaXrjq5v-eaj9XrPQ/exec'
@@ -603,7 +603,7 @@ export default function App() {
     }
   }, [callBackend]);
 
-  const loadUserProfile = (username: string) => {
+  const loadUserProfile = (username: string, password?: string) => {
     const rawDb = localStorage.getItem(KEYS.USERS_DB);
     const db = rawDb ? JSON.parse(rawDb) : {};
     let profile = db[username];
@@ -611,6 +611,7 @@ export default function App() {
     if (!profile) {
       profile = {
         username,
+        password: password || '',
         plan: 'FREE',
         planBaseQuota: 1,
         dailyQuotaLeft: 1,
@@ -620,6 +621,10 @@ export default function App() {
         referralBonus: 0,
         isSheetVerified: false
       };
+      db[username] = profile;
+      localStorage.setItem(KEYS.USERS_DB, JSON.stringify(db));
+    } else if (password) {
+      profile.password = password;
       db[username] = profile;
       localStorage.setItem(KEYS.USERS_DB, JSON.stringify(db));
     }
@@ -1930,28 +1935,70 @@ export default function App() {
             setLoginModalOpen(false);
             return;
           }
+          if (res.message && (res.message.toLowerCase().includes('already') || res.message.toLowerCase().includes('pehle se') || res.message.toLowerCase().includes('exists'))) {
+            setAuthError('Yeh username pehle se registered hai! Password enter karein aur Login button dabayein.');
+            setAuthMode('login');
+            return;
+          }
           setAuthError(res.message || 'Registration nakam hui.');
           return;
         }
         localStorage.setItem(KEYS.USER, u);
-        loadUserProfile(u);
+        loadUserProfile(u, p);
         verifyAndSyncWithGoogleSheet(u);
         setLoginModalOpen(false);
         showToast(`Mubarak! Account ${u} Google Sheet mein kamyabi se register ho gaya!`, 'success');
       } else {
+        // LOGIN MODE
         const res = await callBackend('login', { username: u, password: p });
         if (res && res.error) {
-          setAuthError(res.message || 'Ghalat username ya password.');
+          // Check local cache fallback
+          const rawDb = localStorage.getItem(KEYS.USERS_DB);
+          const db = rawDb ? JSON.parse(rawDb) : {};
+          if (db[u] && db[u].password && db[u].password === p) {
+            localStorage.setItem(KEYS.USER, u);
+            loadUserProfile(u, p);
+            verifyAndSyncWithGoogleSheet(u);
+            setLoginModalOpen(false);
+            showToast(`Khushamdeed ${u.toUpperCase()}! Login kamyab raha.`, 'success');
+            return;
+          }
+
+          if (res.message && (res.message.toLowerCase().includes('nahi mila') || res.message.toLowerCase().includes('not found'))) {
+            setAuthError('Yeh username Google Sheet mein nahi mila. Agar aap naye hain to oper "Register" tab par click karein.');
+          } else if (res.message && (res.message.toLowerCase().includes('ghalat') || res.message.toLowerCase().includes('password'))) {
+            setAuthError('Ghalat Password! Baraye meharbani sahi password enter karein.');
+          } else {
+            // Server connection issue fallback
+            if (db[u]) {
+              localStorage.setItem(KEYS.USER, u);
+              loadUserProfile(u, p);
+              setLoginModalOpen(false);
+              showToast(`Khushamdeed ${u.toUpperCase()}! (Offline Mode Login)`, 'info');
+              return;
+            }
+            setAuthError(res.message || 'Backend se rabta nahi ho saka. Dobara koshish karein.');
+          }
           return;
         }
         localStorage.setItem(KEYS.USER, u);
-        loadUserProfile(u);
+        loadUserProfile(u, p);
         verifyAndSyncWithGoogleSheet(u);
         setLoginModalOpen(false);
         showToast(`Khushamdeed ${u.toUpperCase()}! Google Sheet se login tasdeeq ho gayi.`, 'success');
       }
     } catch {
-      setAuthError('Google Sheet server se rabta nahi ho saka.');
+      // Local recovery if server is unreachable
+      const rawDb = localStorage.getItem(KEYS.USERS_DB);
+      const db = rawDb ? JSON.parse(rawDb) : {};
+      if (db[u] && (!db[u].password || db[u].password === p)) {
+        localStorage.setItem(KEYS.USER, u);
+        loadUserProfile(u, p);
+        setLoginModalOpen(false);
+        showToast(`Khushamdeed ${u.toUpperCase()}! Local session restored.`, 'info');
+      } else {
+        setAuthError('Google Sheet server se rabta nahi ho saka. Internet connection check karein.');
+      }
     }
   };
 
