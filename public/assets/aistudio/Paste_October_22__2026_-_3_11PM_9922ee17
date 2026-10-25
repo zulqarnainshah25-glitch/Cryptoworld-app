@@ -1,0 +1,2962 @@
+/***************************************************************
+ * CRYPTOWORLD - ULTRA AI CRYPTO SIGNAL ENGINE (V6 - GROQ + GEMINI)
+ * Groq Primary + Gemini Fallback + Technical Fallback
+ * FINAL CLEAN VERSION - Duplicates Removed
+ ***************************************************************/
+
+// ==================== Configuration ====================
+const CONFIG = {
+  GEMINI_MODELS: ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash", "gemini-flash-latest"],
+  GROQ_MODELS: ["openai/gpt-oss-120b"],
+  MODEL_RETRIES: 2,
+  RETRY_DELAYS: [1500, 3000, 5000],
+  DEFAULT_DAILY_QUOTA: 1,
+  NO_TRADE_QUOTA_COST: 0.25,
+  TIMEZONE: Session.getScriptTimeZone() || "Asia/Karachi",
+  MAX_HOLD_HOURS: 48,
+  DEVICE_LOCK_DAYS: 7,
+  MAX_CANDLES: 50,
+  CACHE_TTL_USER: 30,
+  CACHE_TTL_NEWS: 900,
+  MAX_REASONING_LENGTH: 800,
+  MIN_CONFIDENCE: 55,
+  MIN_RR: 1.5,
+  MAX_RR: 2.5,
+  MIN_SL_ATR: 1.0,
+  MIN_ADX: 20,
+  RSI_CHASE_LONG_MAX: 75,
+  RSI_CHASE_SHORT_MIN: 20,
+  BREAKOUT_MODE: true,
+  BREAKOUT_VOL: 1.2,
+  BREAKOUT_RR: 2.0,
+  BREAKOUT_MAX_AGE: 2,
+  FALLBACK_MIN_SCORE_DIFF: 5,
+  REFERRAL_BONUS: 2,
+  REFERRAL_MAX: 10,
+  SHARE_REWARD: 0.5,
+  SHARE_MAX_PER_DAY: 2,
+  SHARE_MAX_PER_MONTH: 30,
+  SHARE_COOLDOWN_HOURS: 24,
+  SUGGESTION_MAX_LENGTH: 500,
+  PREMIUM_PLANS: {
+    BASIC:  { signalsPerDay: 5,  durations: [7, 15, 30] },
+    PRO:    { signalsPerDay: 10, durations: [7, 15, 30] },
+    ELITE:  { signalsPerDay: 20, durations: [7, 15, 30] }
+  },
+  CACHE_TTL_PREMIUM: 300
+};
+
+const SHEETS = {
+  USERS: "Users", QUOTA: "Quota", JOURNAL: "Journal", DEVICES: "Devices",
+  REFERRALS: "Referrals", SHARES: "Shares", SUGGESTIONS: "Suggestions",
+  PREMIUM: "Premium", PREMIUM_CODES: "PremiumCodes"
+};
+
+const JOURNAL_HEADERS = [
+  "Timestamp", "Symbol", "Timeframe", "Direction", "Confidence", "AI Confidence", "Technical Confidence",
+  "Entry", "Stop Loss", "Take Profit", "RR", "Risk %", "ATR %", "ATR",
+  "RSI", "MACD", "MACD Signal", "ADX", "Volume Ratio", "Support", "Resistance",
+  "SL Method", "TP Method", "AI Model", "Model Attempts", "Model Status", "Warnings", "Reasoning", "User ID",
+  "Outcome", "ClosedPrice", "ClosedTime"
+];
+
+const DEVICE_HEADERS = ["DeviceId", "Username", "FirstSeen", "LastSeen", "Status", "LockUntil"];
+const REFERRAL_HEADERS = ["Timestamp", "Referrer", "ReferralCode", "ReferredUser", "Status", "RewardGiven", "DeviceId"];
+const SHARE_HEADERS = ["Timestamp", "Username", "Platform", "ShareToken", "RewardGiven", "DeviceId"];
+const SUGGESTION_HEADERS = ["Timestamp", "Username", "Category", "Suggestion", "Status", "AdminReply"];
+const PREMIUM_HEADERS = ["Username", "PlanType", "SignalsPerDay", "StartDate", "ExpiryDate", "Status", "PaymentRef", "ActivatedBy", "Code"];
+const PREMIUM_CODE_HEADERS = ["Code", "PlanType", "DurationDays", "SignalsPerDay", "Status", "UsedBy", "UsedAt", "CreatedAt"];
+
+const QUOTA_REQUIRED_COLUMNS = [
+  "Username", "Password", "Signals_Left", "Last_Used_Time",
+  "ReferralCode", "ReferralCount", "ReferralBonus",
+  "PremiumPlan", "PremiumExpiry", "PremiumSignalsPerDay"
+];
+
+const COL = {
+  TIMESTAMP: 1, SYMBOL: 2, TIMEFRAME: 3, DIRECTION: 4, CONFIDENCE: 5,
+  ENTRY: 8, STOPLOSS: 9, TAKEPROFIT: 10, OUTCOME: 30, CLOSEDPRICE: 31, CLOSEDTIME: 32
+};
+
+// ==================== Security Tools ====================
+const SECURITY = {
+  _salt: null,
+  getSalt: function() {
+    if (!this._salt) {
+      const props = PropertiesService.getScriptProperties();
+      let salt = props.getProperty("PASSWORD_SALT");
+      if (!salt) {
+        salt = Utilities.getUuid() + Utilities.getUuid();
+        props.setProperty("PASSWORD_SALT", salt);
+      }
+      this._salt = salt;
+    }
+    return this._salt;
+  },
+  hashPassword: function(password) {
+    const salt = this.getSalt();
+    const raw = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, password + salt, Utilities.Charset.UTF_8);
+    return raw.map(function(b) { return (b < 0 ? b + 256 : b).toString(16).padStart(2, "0"); }).join("");
+  },
+  verifyPassword: function(password, hash) { return this.hashPassword(password) === hash; },
+  validateSymbol: function(symbol) { return /^[A-Z0-9]{2,20}USDT$/.test(symbol); },
+  sanitizeString: function(str, maxLen) {
+    return String(str || "").substring(0, maxLen || 200).replace(/[\x00-\x1F\x7F]/g, "");
+  }
+};
+
+// ==================== Device Fingerprint Management ====================
+const DeviceManager = {
+  getSheet: function(ss) {
+    let sheet = ss.getSheetByName(SHEETS.DEVICES);
+    if (!sheet) { sheet = ss.insertSheet(SHEETS.DEVICES); sheet.appendRow(DEVICE_HEADERS); }
+    return sheet;
+  },
+  checkDevice: function(ss, deviceId, username) {
+    if (!deviceId) return { allowed: true };
+    const sheet = this.getSheet(ss);
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) {
+      const now = new Date();
+      const lockUntil = new Date(now.getTime() + CONFIG.DEVICE_LOCK_DAYS * 24 * 60 * 60 * 1000);
+      sheet.appendRow([deviceId, username, now, now, "ACTIVE", lockUntil]);
+      return { allowed: true };
+    }
+    const data = sheet.getRange(2, 1, lastRow - 1, 6).getValues();
+    const now = new Date();
+    const deviceKey = deviceId.toLowerCase().trim();
+    for (let i = 0; i < data.length; i++) {
+      const existingId = String(data[i][0] || "").toLowerCase().trim();
+      if (existingId !== deviceKey) continue;
+      const existingUser = String(data[i][1] || "").toLowerCase().trim();
+      const lockUntil = data[i][5] instanceof Date ? data[i][5] : null;
+      if (lockUntil && lockUntil > now && existingUser !== username.toLowerCase()) {
+        const daysLeft = Math.ceil((lockUntil - now) / (1000 * 60 * 60 * 24));
+        return { allowed: false, message: "Is device par pehle hi account register hai. " + daysLeft + " din baad dobara koshish karein.", existingUser: data[i][1] };
+      }
+      sheet.getRange(i + 2, 4).setValue(now);
+      if (existingUser === username.toLowerCase()) {
+        sheet.getRange(i + 2, 6).setValue(new Date(now.getTime() + CONFIG.DEVICE_LOCK_DAYS * 24 * 60 * 60 * 1000));
+      }
+      return { allowed: true };
+    }
+    const lockUntilNew = new Date(now.getTime() + CONFIG.DEVICE_LOCK_DAYS * 24 * 60 * 60 * 1000);
+    sheet.appendRow([deviceId, username, now, now, "ACTIVE", lockUntilNew]);
+    return { allowed: true };
+  },
+  unlockDevice: function(ss, deviceId) {
+    const sheet = this.getSheet(ss);
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) return false;
+    const data = sheet.getRange(2, 1, lastRow - 1, 6).getValues();
+    for (let i = 0; i < data.length; i++) {
+      if (String(data[i][0] || "").toLowerCase().trim() === String(deviceId).toLowerCase().trim()) {
+        sheet.getRange(i + 2, 6).setValue(new Date(0));
+        return true;
+      }
+    }
+    return false;
+  }
+};
+
+// ==================== Main Router ====================
+function doPost(e) {
+  try {
+    if (!e || !e.postData || !e.postData.contents) return jsonResponse({ error: true, message: "Koi data moosool nahi hua." });
+    let data;
+    try { data = JSON.parse(e.postData.contents); } catch (err) { return jsonResponse({ error: true, message: "Ghalat JSON format." }); }
+    const deviceId = data.deviceId || "unknown";
+    const cache = CacheService.getScriptCache();
+    const rateKey = "rate_" + deviceId;
+    const count = Number(cache.get(rateKey) || 0);
+    if (count >= 30) return jsonResponse({ error: true, message: "Bohat zyada requests. 2 minute baad koshish karein." });
+    cache.put(rateKey, count + 1, 120);
+    const action = String(data.action || "").trim().toLowerCase();
+    if (action === "login") return handleLogin(data);
+    if (action === "register") return handleRegister(data);
+    if (action === "signal") return handleSignal(data);
+    if (action === "quota") return handleCheckQuota(data);
+    if (action === "accuracy") return handleAccuracyReport(data);
+    if (action === "unlock_device") return handleUnlockDevice(data);
+    if (action === "share_claim") return handleShareClaim(data);
+    if (action === "submit_suggestion") return handleSubmitSuggestion(data);
+    if (action === "get_my_suggestions") return handleGetMySuggestions(data);
+    if (action === "redeem_premium_code") return handleRedeemPremiumCode(data);
+    if (action === "check_premium") return handleCheckPremium(data);
+    if (action === "get_premium_plans") return handleGetPremiumPlans(data);
+    if (action === "get_referral_info") return handleGetReferralInfo(data);
+    if (action === "admin_activate_premium") return handleAdminActivatePremium(data);
+    if (action === "admin_create_premium_codes") return handleAdminCreatePremiumCodes(data);
+    if (action === "admin_bulk_generate") return handleAdminBulkGenerate(data);
+    if (action === "admin_generate_single") return handleAdminGenerateSingle(data);
+    if (action === "admin_list_codes") return handleAdminListCodes(data);
+    if (action === "check_lock") return handleCheckLock(data);
+    if (action === "set_lock") return handleSetLock(data);
+    if (action === "get_open_signals") return handleGetOpenSignals(data);
+    if (action === "update_outcome") return handleUpdateOutcome(data);
+    if (action === "watch_ad_reward") return handleWatchAdReward(data);
+    if (action === "sync_user_plan") return handleSyncUserPlan(data);
+    if (action === "admin_list_users") return handleAdminListUsers(data);
+    if (action === "admin_reset_password") return handleAdminResetPassword(data);
+    return jsonResponse({ error: true, message: "Ghalat action." });
+  } catch (error) {
+    return jsonResponse({ error: true, message: "Backend kharabi: " + String(error.message || error) });
+  }
+}
+
+function doGet() {
+  return jsonResponse({ success: true, service: "CryptoWorld V6 (Groq + Gemini)", status: "online", time: new Date().toISOString() });
+}
+
+// ==================== Registration ====================
+function handleRegister(data) {
+  const username = SECURITY.sanitizeString(data.username || data.userId || "", 50).trim();
+  const password = String(data.password || "").trim();
+  const deviceId = SECURITY.sanitizeString(data.deviceId || "", 128).trim();
+  const referralCode = SECURITY.sanitizeString(data.referralCode || "", 30).trim().toUpperCase();
+  if (!username || !password) return jsonResponse({ error: true, message: "Username aur Password dono darkar hain." });
+  if (username.length < 3) return jsonResponse({ error: true, message: "Username kam az kam 3 harf ka hona chahiye." });
+  if (password.length < 6) return jsonResponse({ error: true, message: "Password kam az kam 6 harf ka hona chahiye." });
+  const ss = getSpreadsheet();
+  const quotaSheet = getOrCreateQuotaSheet(ss);
+  const existing = getUserQuotaRow(quotaSheet, username);
+  if (existing) return jsonResponse({ error: true, message: "Ye username pehle se register hai." });
+  if (deviceId) {
+    const deviceCheck = DeviceManager.checkDevice(ss, deviceId, username);
+    if (!deviceCheck.allowed) return jsonResponse({ error: true, message: deviceCheck.message, code: "DEVICE_LOCKED", existingUser: deviceCheck.existingUser || "" });
+  }
+  let referrerUser = null;
+  if (referralCode) {
+    const ownCode = generateReferralCode(username);
+    if (referralCode === ownCode) return jsonResponse({ error: true, message: "Apna hi referral code istemal nahi kar sakte." });
+    referrerUser = findUserByReferralCode(quotaSheet, referralCode);
+    if (!referrerUser) return jsonResponse({ error: true, message: "Referral code ghalat hai." });
+  }
+  const hashedPassword = SECURITY.hashPassword(password);
+  const myReferralCode = generateReferralCode(username);
+  const colMap = getQuotaColumnMap(quotaSheet);
+  const newRow = new Array(Math.max(quotaSheet.getLastColumn(), 1)).fill("");
+  newRow[0] = username; newRow[1] = hashedPassword; newRow[2] = CONFIG.DEFAULT_DAILY_QUOTA; newRow[3] = new Date();
+  if (colMap.ReferralCode) newRow[colMap.ReferralCode - 1] = myReferralCode;
+  if (colMap.ReferralCount) newRow[colMap.ReferralCount - 1] = 0;
+  if (colMap.ReferralBonus) newRow[colMap.ReferralBonus - 1] = 0;
+  if (colMap.PremiumPlan) newRow[colMap.PremiumPlan - 1] = "";
+  if (colMap.PremiumExpiry) newRow[colMap.PremiumExpiry - 1] = "";
+  if (colMap.PremiumSignalsPerDay) newRow[colMap.PremiumSignalsPerDay - 1] = 0;
+  quotaSheet.appendRow(newRow);
+  if (referrerUser && referralCode) {
+    const refSheet = getOrCreateReferralsSheet(ss);
+    refSheet.appendRow([new Date(), referrerUser.username, referralCode, username, "PENDING", 0, deviceId]);
+  }
+  updateUserCache(username, hashedPassword, CONFIG.DEFAULT_DAILY_QUOTA, new Date());
+  return jsonResponse({ error: false, success: true, username: username, userId: username, referralCode: myReferralCode, signalsLeft: CONFIG.DEFAULT_DAILY_QUOTA, quotaLimit: CONFIG.DEFAULT_DAILY_QUOTA });
+}
+
+function handleLogin(data) {
+  const username = SECURITY.sanitizeString(data.username || data.userId || "", 50).trim();
+  const password = String(data.password || "").trim();
+  const deviceId = SECURITY.sanitizeString(data.deviceId || "", 128).trim();
+  if (!username || !password) return jsonResponse({ error: true, message: "Username aur Password dono darkar hain." });
+  const ss = getSpreadsheet();
+  const quotaSheet = getOrCreateQuotaSheet(ss);
+  const user = getAndUpdateUserQuota(quotaSheet, username);
+  if (!user) return jsonResponse({ error: true, message: "Username nahi mila. Pehle register karein." });
+  if (!SECURITY.verifyPassword(password, user.password)) return jsonResponse({ error: true, message: "Username ya password ghalat hai." });
+  if (deviceId) DeviceManager.checkDevice(ss, deviceId, username);
+  return jsonResponse({
+    error: false, success: true, username: user.username, userId: user.username,
+    signalsLeft: user.signalsLeft,
+    quotaLimit: user.premiumActive ? user.premiumSignalsPerDay : CONFIG.DEFAULT_DAILY_QUOTA,
+    referralCode: user.referralCode || generateReferralCode(user.username),
+    referralCount: user.referralCount || 0, referralBonus: user.referralBonus || 0,
+    premiumActive: user.premiumActive || false, premiumPlan: user.premiumPlan || "",
+    premiumSignalsPerDay: user.premiumSignalsPerDay || 0
+  });
+}
+
+function handleUnlockDevice(data) {
+  const adminKey = String(data.adminKey || "").trim();
+  const expectedKey = PropertiesService.getScriptProperties().getProperty("ADMIN_KEY");
+  if (!expectedKey || adminKey !== expectedKey) return jsonResponse({ error: true, message: "Ghair mujaz darkhwast." });
+  const deviceId = SECURITY.sanitizeString(data.deviceId || "", 128).trim();
+  if (!deviceId) return jsonResponse({ error: true, message: "Device ID darkar hai." });
+  const ss = getSpreadsheet();
+  const ok = DeviceManager.unlockDevice(ss, deviceId);
+  return jsonResponse({ error: !ok, message: ok ? "Device unlock ho gayi." : "Device nahi mili." });
+}
+// ==================== Signal Processing (Groq + Gemini) ====================
+function handleSignal(data) {
+  const username = SECURITY.sanitizeString(data.username || data.userId || "", 50).trim();
+  const symbol = SECURITY.sanitizeString(data.symbol || "", 20).trim().toUpperCase();
+  const timeframe = normalizeTF(data.timeframe || "1h");
+
+  if (!username) return jsonResponse({ error: true, message: "Username darkar hai." });
+  if (!symbol) return jsonResponse({ error: true, message: "Symbol darkar hai." });
+  if (!SECURITY.validateSymbol(symbol)) {
+    return jsonResponse({ error: true, message: "Ghalat symbol format. Misal: BTCUSDT" });
+  }
+
+  const geminiApiKey = getGeminiApiKey();
+  const groqApiKey = getGroqApiKey();
+
+  if (!geminiApiKey && !groqApiKey) {
+    return jsonResponse({ error: true, message: "Koi AI API key set nahi hai." });
+  }
+
+  const ss = getSpreadsheet();
+  const quotaSheet = getOrCreateQuotaSheet(ss);
+  const journalSheet = getOrCreateJournalSheet(ss);
+  const userQuota = getAndUpdateUserQuota(quotaSheet, username);
+
+  if (!userQuota) return jsonResponse({ error: true, message: "User account nahi mila." });
+
+  if (userQuota.signalsLeft <= 0) {
+    return jsonResponse({
+      error: true,
+      message: "Aaj ki quota khatam ho gayi.",
+      signalsLeft: 0,
+      quotaLimit: CONFIG.DEFAULT_DAILY_QUOTA
+    });
+  }
+
+  const market = normalizeMarketData(data, timeframe);
+  market.timeframe = timeframe;
+  if (!validPositive(market.currentPrice)) {
+    return jsonResponse({ error: true, message: "Ghalat futures qeemat." });
+  }
+
+  market.news = fetchMarketNews();
+  market.breakouts = detectBreakouts(market);
+
+  let aiResult = null;
+
+  if (groqApiKey) {
+    aiResult = analyzeWithGroq(groqApiKey, market, symbol, timeframe);
+    
+    if (!aiResult.direction || aiResult.status === "GROQ_FAILED" || aiResult.status === "GROQ_API_KEY_ERROR") {
+      Logger.log("Groq fail: " + aiResult.reasoning + " — Gemini try kar rahe hain...");
+      
+      if (geminiApiKey) {
+        const geminiResult = analyzeWithGemini(geminiApiKey, market, symbol, timeframe);
+        geminiResult.reasoning = "[Groq failed, Gemini fallback] " + geminiResult.reasoning;
+        aiResult = geminiResult;
+      }
+    }
+  } else if (geminiApiKey) {
+    aiResult = analyzeWithGemini(geminiApiKey, market, symbol, timeframe);
+  } else {
+    aiResult = {
+      direction: null, confidence: 40,
+      reasoning: "Koi AI API available nahi.",
+      model: "no-ai", attempts: 0, status: "NO_AI"
+    };
+  }
+
+  let direction = normalizeDirection(aiResult.direction);
+  market.waitForPick = aiResult.waitForPick || null;
+
+  let technicalFallback = false;
+  if (!direction || aiResult.status === "TECHNICAL_FALLBACK" || aiResult.status === "GROQ_FAILED") {
+    direction = fallbackDirection(market);
+    technicalFallback = true;
+  }
+
+  const warnings = buildWarnings(market, direction);
+
+  if (technicalFallback) {
+    warnings.push("[SYSTEM] AI APIs dastiyab nahi theen. Ye nateeja technical fallback se liya gaya. Wajah: " + aiResult.reasoning);
+  } else {
+    warnings.push("[AI STATUS] Market analysis kamyab, model: " + aiResult.model);
+  }
+
+  const rawMacroBull = (validPositive(market.tf2.ema20) && validPositive(market.tf2.ema50) && market.tf2.ema20 > market.tf2.ema50) ||
+                      (validPositive(market.tf3.ema20) && validPositive(market.tf3.ema50) && market.tf3.ema20 > market.tf3.ema50);
+  const rawMacroBear = (validPositive(market.tf2.ema20) && validPositive(market.tf2.ema50) && market.tf2.ema20 < market.tf2.ema50) ||
+                      (validPositive(market.tf3.ema20) && validPositive(market.tf3.ema50) && market.tf3.ema20 < market.tf3.ema50);
+
+  const isMacroBull = rawMacroBull && !rawMacroBear;
+  const isMacroBear = rawMacroBear && !rawMacroBull;
+
+  if (direction === "SHORT" && isMacroBull) warnings.push("[WARNING] Counter-Trend Scalp: Macro timeframe bullish hai.");
+  else if (direction === "LONG" && isMacroBear) warnings.push("[WARNING] Counter-Trend Scalp: Macro timeframe bearish hai.");
+
+  if (direction === "NO_TRADE" || (aiResult.direction === "NO_TRADE" && fallbackDirection(market) === "NO_TRADE")) {
+    const remaining = consumePartialQuota(quotaSheet, userQuota.row, userQuota.signalsLeft, CONFIG.NO_TRADE_QUOTA_COST);
+
+    return jsonResponse({
+      error: false, success: true,
+      username: username, symbol: symbol, timeframe: timeframe,
+      direction: "NO_TRADE", signalDirection: "NEUTRAL",     
+      currentPrice: market.currentPrice, entry: market.currentPrice,
+      stopLoss: 0, takeProfit: 0, rr: "N/A",
+      confidence: Math.min(aiResult.confidence || 30, 40),
+      model: aiResult.model,
+      warnings: warnings,
+      reasoning: aiResult.reasoning || "Market ke halaat filhal wazeh nahi.",
+      waitFor: calculateWaitFor(market, direction),
+      signalsLeft: remaining
+    });
+  }
+
+  const gateReasons = [];
+  const boDir = (CONFIG.BREAKOUT_MODE && market.breakouts) ? market.breakouts[direction] : null;
+  if (boDir) {
+    warnings.push("[BREAKOUT] " + direction + " breakout confirm hai (level " + roundNumber(boDir.level, 6) +
+                  ", volume " + boDir.volRatio.toFixed(2) + "x) — ADX gate nahi lagaya gaya.");
+  }
+  if (!boDir && market.adx > 0 && market.adx < CONFIG.MIN_ADX) {
+    gateReasons.push("ADX " + market.adx.toFixed(1) + " (< " + CONFIG.MIN_ADX + ") — trend kamzor hai");
+  }
+  if (direction === "LONG" && market.rsi >= CONFIG.RSI_CHASE_LONG_MAX) {
+    gateReasons.push("RSI " + market.rsi.toFixed(1) + " (>= " + CONFIG.RSI_CHASE_LONG_MAX + ") — LONG chase karna risky hai");
+  }
+  if (direction === "SHORT" && market.rsi > 0 && market.rsi <= CONFIG.RSI_CHASE_SHORT_MIN) {
+    gateReasons.push("RSI " + market.rsi.toFixed(1) + " (<= " + CONFIG.RSI_CHASE_SHORT_MIN + ") — SHORT chase karna risky hai");
+  }
+
+  if (gateReasons.length > 0) {
+    const remaining = consumePartialQuota(quotaSheet, userQuota.row, userQuota.signalsLeft, CONFIG.NO_TRADE_QUOTA_COST);
+    const gateWaitDir = "WAIT_" + direction;
+    const gateReasoning = direction + " bias hai lekin entry quality kamzor hai: " + gateReasons.join(" | ") +
+                          ". Behtar setup ya pullback ka wait karein.";
+    warnings.push("[QUALITY GATE] " + gateReasoning);
+
+    const gateStructure = calculateMarketStructure(market, direction);
+    const gateTrade = calculateSmartTradeLevels(market, direction, gateStructure, timeframe);
+
+    return jsonResponse({
+      error: false, success: true,
+      username: username, symbol: symbol, timeframe: timeframe,
+      direction: gateWaitDir,
+      signalDirection: direction,
+      entryStatus: "WAIT_PULLBACK",
+      currentPrice: market.currentPrice,
+      suggestedEntry: gateTrade.suggestedEntry || market.currentPrice,
+      triggerPrice: gateTrade.triggerPrice || market.currentPrice,
+      invalidationPrice: gateTrade.invalidationPrice || gateTrade.stopLoss,
+      entry: null,
+      stopLoss: 0, takeProfit: 0, rr: "N/A",
+      confidence: 40,
+      directionConfidence: aiResult.confidence || 60,
+      entryConfidence: 35,
+      signalQuality: "WAIT",
+      signalQualityDetails: "Quality gate: " + gateReasons.join(", "),
+      model: aiResult.model,
+      warnings: warnings,
+      reasoning: gateReasoning,
+      waitFor: calculateWaitFor(market, direction),
+      signalsLeft: remaining
+    });
+  }
+
+  const htfCheck = detectHTFConflict(market, direction, isMacroBull, isMacroBear);
+  const extCheck = detectOverextension(market, direction);
+  const shouldWait = extCheck.overextended || (htfCheck.conflict && extCheck.candleExtension > 1.2);
+
+  const rsiZone = calculateRSIZonePenalty(market, direction);
+  const isOversoldOrOverbought = rsiZone.zone === "EXTREME_OVERSOLD" || 
+                                  rsiZone.zone === "OVERSOLD" || 
+                                  rsiZone.zone === "EXTREME_OVERBOUGHT" || 
+                                  rsiZone.zone === "OVERBOUGHT";
+  
+  const isStrongHTFConflict = htfCheck.conflict && htfCheck.htfDisagreeCount >= 2;
+
+  if (isStrongHTFConflict && direction !== "NO_TRADE") {
+    const remaining = consumePartialQuota(quotaSheet, userQuota.row, userQuota.signalsLeft, CONFIG.NO_TRADE_QUOTA_COST);
+    
+    const strongWaitDir = direction === "SHORT" ? "WAIT_SHORT" : "WAIT_LONG";
+    const strongReasoning = "Strong HTF conflict: " + htfCheck.reason + 
+                            ". Counter-trend trade risk zyada hai. Confirmed continuation ka wait karein.";
+    
+    warnings.push("[STRONG HTF CONFLICT] " + strongReasoning);
+    
+    const strongStructure = calculateMarketStructure(market, direction);
+    const strongTrade = calculateSmartTradeLevels(market, direction, strongStructure, timeframe);
+    
+    return jsonResponse({
+      error: false, success: true,
+      username: username, symbol: symbol, timeframe: timeframe,
+      direction: strongWaitDir,
+      signalDirection: direction,
+      entryStatus: "WAIT_COUNTER_TREND",
+      currentPrice: market.currentPrice,
+      suggestedEntry: strongTrade.suggestedEntry || market.currentPrice,
+      triggerPrice: strongTrade.triggerPrice || market.currentPrice,
+      invalidationPrice: strongTrade.invalidationPrice || strongTrade.stopLoss,
+      entry: null,
+      stopLoss: 0, takeProfit: 0, rr: "N/A",
+      confidence: 35,
+      directionConfidence: aiResult.confidence || 60,
+      entryConfidence: 30,
+      signalQuality: "WAIT",
+      signalQualityDetails: "Strong HTF conflict: " + htfCheck.htfDisagreeCount + " frames disagree",
+      model: aiResult.model,
+      warnings: warnings,
+      reasoning: strongReasoning,
+      htfConflict: htfCheck,
+      waitFor: calculateWaitFor(market, direction),
+      signalsLeft: remaining
+    });
+  }
+
+  if (htfCheck.conflict && isOversoldOrOverbought) {
+    const remaining = consumePartialQuota(quotaSheet, userQuota.row, userQuota.signalsLeft, CONFIG.NO_TRADE_QUOTA_COST);
+    
+    const waitDirection = direction === "SHORT" ? "WAIT_SHORT" : "WAIT_LONG";
+    const ctwaitReasoning = "Trend " + direction + " confirm hai lekin " + 
+                            rsiZone.reason + " aur HTF conflict hai. " +
+                            "Counter-trend trade oversold/overbought zone mein risky hai. " +
+                            "Pullback ya confirmed continuation ka wait karein.";
+    
+    warnings.push("[COUNTER-TREND BLOCK] " + ctwaitReasoning);
+    
+    const ctStructure = calculateMarketStructure(market, direction);
+    const ctTrade = calculateSmartTradeLevels(market, direction, ctStructure, timeframe);
+    
+    return jsonResponse({
+      error: false, success: true,
+      username: username, symbol: symbol, timeframe: timeframe,
+      direction: waitDirection,
+      signalDirection: direction,
+      entryStatus: "WAIT_COUNTER_TREND",
+      currentPrice: market.currentPrice,
+      suggestedEntry: ctTrade.suggestedEntry || market.currentPrice,
+      triggerPrice: ctTrade.triggerPrice || market.currentPrice,
+      invalidationPrice: ctTrade.invalidationPrice || ctTrade.stopLoss,
+      entry: null,
+      stopLoss: 0, takeProfit: 0, rr: "N/A",
+      confidence: 35,
+      directionConfidence: aiResult.confidence || 60,
+      entryConfidence: 30,
+      signalQuality: "WAIT",
+      signalQualityDetails: "Counter-trend block: " + rsiZone.reason + " + HTF conflict",
+      model: aiResult.model,
+      warnings: warnings,
+      reasoning: ctwaitReasoning,
+      overextension: extCheck,
+      htfConflict: htfCheck,
+      rsiZone: rsiZone,
+      waitFor: calculateWaitFor(market, direction),
+      signalsLeft: remaining
+    });
+  }
+
+  if (shouldWait) {
+    const remaining = consumePartialQuota(quotaSheet, userQuota.row, userQuota.signalsLeft, CONFIG.NO_TRADE_QUOTA_COST);
+    
+    const waitDirection = direction === "SHORT" ? "WAIT_SHORT" : "WAIT_LONG";
+    const waitReasons = [];
+    
+    if (extCheck.overextended) {
+      waitReasons.push("Market overextended: " + extCheck.reason);
+    }
+    if (htfCheck.conflict) {
+      waitReasons.push("HTF conflict: " + htfCheck.reason);
+    }
+    
+    const waitReasoning = "Bearish/Bullish trend confirm hai lekin entry timing abhi sahi nahi. " +
+                          waitReasons.join(" | ") + 
+                          ". Pullback/retest ya confirmed continuation ka wait karein.";
+    
+    warnings.push("[WAIT STATE] " + waitReasoning);
+
+    const waitStructure = calculateMarketStructure(market, direction);
+    const waitTrade = calculateSmartTradeLevels(market, direction, waitStructure, timeframe);
+    
+    const waitSuggestedEntry = waitTrade.suggestedEntry || market.currentPrice;
+    const waitTriggerPrice = waitTrade.triggerPrice || market.currentPrice;
+    const waitInvalidationPrice = waitTrade.invalidationPrice || waitTrade.stopLoss;
+    
+    return jsonResponse({
+      error: false, success: true,
+      username: username, symbol: symbol, timeframe: timeframe,
+      direction: waitDirection,
+      signalDirection: direction,
+      entryStatus: "WAIT_PULLBACK",
+      currentPrice: market.currentPrice,
+      suggestedEntry: waitSuggestedEntry,
+      triggerPrice: waitTriggerPrice,
+      invalidationPrice: waitInvalidationPrice,
+      entry: null,
+      stopLoss: 0, takeProfit: 0, rr: "N/A",
+      confidence: 40,
+      directionConfidence: aiResult.confidence || 60,
+      entryConfidence: 40,
+      signalQuality: "WAIT",                                      
+      signalQualityDetails: "Entry timing not optimal — " + waitReasons.join(", "),
+      model: aiResult.model,
+      warnings: warnings,
+      reasoning: waitReasoning,
+      overextension: extCheck,
+      htfConflict: htfCheck,
+      waitFor: calculateWaitFor(market, direction),
+      signalsLeft: remaining
+    });
+  }
+
+  const structure = calculateMarketStructure(market, direction);
+  const trade = calculateSmartTradeLevels(market, direction, structure, timeframe);
+
+  if (trade.insufficientRoom) {
+    const remaining = consumePartialQuota(quotaSheet, userQuota.row, userQuota.signalsLeft, CONFIG.NO_TRADE_QUOTA_COST);
+    
+    warnings.push("[INSUFFICIENT ROOM] " + direction + " setup valid hai lekin TP tak sirf " + 
+                  trade.tpDistanceATR.toFixed(2) + "× ATR ka room hai. " +
+                  "Target bohot qareeb hai — reward risk ke qabil nahi.");
+    
+    return jsonResponse({
+      error: false, success: true,
+      username: username, symbol: symbol, timeframe: timeframe,
+      direction: "WAIT_" + direction,
+      signalDirection: direction,
+      entryStatus: "WAIT_BETTER_RR",
+      currentPrice: market.currentPrice,
+      entry: null,
+      stopLoss: 0, takeProfit: 0, rr: "N/A",
+      confidence: 35,
+      directionConfidence: aiResult.confidence || 60,
+      entryConfidence: 30,
+      model: aiResult.model,
+      warnings: warnings,
+      reasoning: "Market " + direction + " trend confirm karta hai lekin TP tak sufficient room nahi. " +
+                 "Behtar setup ka wait karein.",
+      trade: {
+        tpDistanceATR: trade.tpDistanceATR,
+        roomToTP: trade.roomToTP
+      },
+      waitFor: calculateWaitFor(market, direction),
+      signalsLeft: remaining
+    });
+  }
+
+  if (trade.rr < CONFIG.MIN_RR) {
+    const remaining = consumePartialQuota(quotaSheet, userQuota.row, userQuota.signalsLeft, CONFIG.NO_TRADE_QUOTA_COST);
+
+    warnings.push("[LOW R:R] " + direction + " setup mein R:R sirf 1:" + roundNumber(trade.rr, 2) +
+                  " hai (kam az kam 1:" + CONFIG.MIN_RR + " chahiye). Behtar entry ka wait karein.");
+
+    return jsonResponse({
+      error: false, success: true,
+      username: username, symbol: symbol, timeframe: timeframe,
+      direction: "WAIT_" + direction,
+      signalDirection: direction,
+      entryStatus: "WAIT_BETTER_RR",
+      currentPrice: market.currentPrice,
+      entry: null,
+      stopLoss: 0, takeProfit: 0, rr: "N/A",
+      confidence: 35,
+      directionConfidence: aiResult.confidence || 60,
+      entryConfidence: 30,
+      model: aiResult.model,
+      warnings: warnings,
+      reasoning: "Market " + direction + " trend confirm karta hai lekin risk/reward kam hai (1:" +
+                 roundNumber(trade.rr, 2) + "). Behtar setup ka wait karein.",
+      trade: { rr: trade.rr, minRR: CONFIG.MIN_RR },
+      waitFor: calculateWaitFor(market, direction),
+      signalsLeft: remaining
+    });
+  }
+
+  const technicalConfidence = calculateTechnicalConfidence(market, direction, structure, trade);
+  let finalConfidence = calculateFinalConfidence(aiResult.confidence, technicalConfidence, market, direction, trade, structure);
+
+  const rsiPenaltyCheck = calculateRSIZonePenalty(market, direction);
+  if (rsiPenaltyCheck.penalty > 0) {
+    finalConfidence = Math.max(20, finalConfidence - rsiPenaltyCheck.penalty);
+    warnings.push("[RSI ZONE] " + rsiPenaltyCheck.reason + " (-" + rsiPenaltyCheck.penalty + "% confidence)");
+  }
+
+  const signalQuality = calculateSignalQuality(market, direction);
+
+  if (finalConfidence < CONFIG.MIN_CONFIDENCE) {
+    const remaining = consumePartialQuota(quotaSheet, userQuota.row, userQuota.signalsLeft, CONFIG.NO_TRADE_QUOTA_COST);
+    warnings.push("[SAFETY] Confidence bohat kam (" + finalConfidence + "%), signal mustarad.");
+
+    return jsonResponse({
+      error: false, success: true,
+      username: username, symbol: symbol, timeframe: timeframe,
+      direction: "NO_TRADE", signalDirection: "NEUTRAL",    
+      currentPrice: market.currentPrice, entry: market.currentPrice,
+      stopLoss: 0, takeProfit: 0, rr: "N/A",
+      confidence: finalConfidence, model: aiResult.model,
+      warnings: warnings,
+      reasoning: aiResult.reasoning || "Confidence bohat kam thi. Behtar setup ka wait karein.",
+      waitFor: calculateWaitFor(market, direction),
+      signalsLeft: remaining
+    });
+  }
+
+  const reasoning = buildReasoning(market, direction, structure, trade, aiResult.reasoning, technicalFallback);
+  const remainingSignals = consumeQuota(quotaSheet, userQuota.row, userQuota.signalsLeft);
+
+  appendJournal(journalSheet, market.marketTimestamp, symbol, timeframe, direction, finalConfidence,
+    aiResult.confidence, technicalConfidence, trade, market, structure,
+    aiResult.model, aiResult.attempts, warnings, reasoning, username);
+
+  try {
+    processReferralReward(ss, username);
+  } catch (e) {
+    Logger.log("Referral reward error: " + e.message);
+  }
+
+  return jsonResponse({
+    error: false, success: true,
+    username: username, symbol: symbol, timeframe: timeframe,
+    direction: direction, signalDirection: direction,
+    entryStatus: "READY",
+    currentPrice: market.currentPrice,
+    entry: trade.entry,
+    suggestedEntry: trade.suggestedEntry,
+    triggerPrice: trade.triggerPrice,
+    invalidationPrice: trade.invalidationPrice,
+    entryImproved: trade.entryImproved,
+    stopLoss: trade.stopLoss, stop_loss: trade.stopLoss,
+    takeProfit: trade.takeProfit, take_profit: trade.takeProfit,
+    rr: "1:" + roundNumber(trade.rr, 2),
+    suggestedRR: "1:" + roundNumber(trade.suggestedRR || trade.rr, 2),
+    confidence: finalConfidence,
+    directionConfidence: aiResult.confidence || 60,
+    entryConfidence: technicalConfidence || 50,
+    signalQuality: signalQuality.quality,
+    signalQualityDetails: signalQuality.details,
+    signalQualityScore: signalQuality.score + "/" + signalQuality.maxScore,
+    model: aiResult.model,
+    warnings: warnings,
+    reasoning: reasoning,
+    signalsLeft: remainingSignals
+  });
+}
+// ==================== Breakout Detection ====================
+function detectBreakouts(market) {
+  const none = { LONG: null, SHORT: null };
+  if (!CONFIG.BREAKOUT_MODE) return none;
+  try {
+    const raw = market.recentCandles || [];
+    const cs = [];
+    raw.forEach(function(c) {
+      let h, l, cl, v;
+      if (Array.isArray(c)) { h = Number(c[2]); l = Number(c[3]); cl = Number(c[4]); v = Number(c[5]); }
+      else if (c && typeof c === "object") { h = Number(c.high || c.h); l = Number(c.low || c.l); cl = Number(c.close || c.c); v = Number(c.volume || c.v || 0); }
+      if (h > 0 && l > 0 && cl > 0) cs.push({ h: h, l: l, c: cl, v: Number.isFinite(v) ? v : 0 });
+    });
+    const n = cs.length;
+    const age = CONFIG.BREAKOUT_MAX_AGE;
+    if (n < 30) return none;
+    const K = 2;
+    const base = cs[n - age - 1];
+    const hist = cs.slice(0, n - age);
+    const lastClose = cs[n - 1].c;
+    const price = Number(market.currentPrice) || lastClose;
+    const pivH = [], pivL = [];
+    for (let i = K; i < hist.length - K; i++) {
+      let isH = true, isL = true;
+      for (let j = 1; j <= K; j++) {
+        if (hist[i].h <= hist[i - j].h || hist[i].h <= hist[i + j].h) isH = false;
+        if (hist[i].l >= hist[i - j].l || hist[i].l >= hist[i + j].l) isL = false;
+      }
+      if (isH) pivH.push(hist[i].h);
+      if (isL) pivL.push(hist[i].l);
+    }
+    function volRatioAt(b) {
+      const from = Math.max(0, b - 20);
+      const prev = cs.slice(from, b);
+      if (prev.length < 5) return 0;
+      const avg = prev.reduce(function(a, x) { return a + x.v; }, 0) / prev.length;
+      return avg > 0 ? cs[b].v / avg : 0;
+    }
+    const out = { LONG: null, SHORT: null };
+    const upLevels = pivH.filter(function(p) { return base.c <= p && p < lastClose; });
+    if (upLevels.length && price > Math.max.apply(null, upLevels)) {
+      const level = Math.max.apply(null, upLevels);
+      let b = -1;
+      for (let i = n - age; i < n; i++) { if (cs[i].c > level) { b = i; break; } }
+      if (b >= 0) { const vr = volRatioAt(b); if (vr >= CONFIG.BREAKOUT_VOL) out.LONG = { level: level, volRatio: vr, age: n - 1 - b }; }
+    }
+    const dnLevels = pivL.filter(function(p) { return base.c >= p && p > lastClose; });
+    if (dnLevels.length && price < Math.min.apply(null, dnLevels)) {
+      const level = Math.min.apply(null, dnLevels);
+      let b = -1;
+      for (let i = n - age; i < n; i++) { if (cs[i].c < level) { b = i; break; } }
+      if (b >= 0) { const vr = volRatioAt(b); if (vr >= CONFIG.BREAKOUT_VOL) out.SHORT = { level: level, volRatio: vr, age: n - 1 - b }; }
+    }
+    return out;
+  } catch (e) { Logger.log("detectBreakouts error: " + e.message); return none; }
+}
+
+function breakoutPromptText(market) {
+  const b = market.breakouts;
+  if (!b) return "";
+  const parts = [];
+  ["LONG", "SHORT"].forEach(function(d) {
+    if (b[d]) parts.push(d + " breakout: last closed candle ne " + roundNumber(b[d].level, 6) + " ke paar close kiya (volume " + b[d].volRatio.toFixed(2) + "x avg)");
+  });
+  if (!parts.length) return "";
+  return "BREAKOUT CONFIRMED (code-verified): " + parts.join(" | ") + ". ADX breakout ke foran baad hamesha kam hota hai (ADX lagging hai) — sirf kam ADX ki wajah se NO_TRADE mat do.\n\n";
+}
+
+function calculateSmartTradeLevels(market, direction, structure, timeframe) {
+  const entry = market.currentPrice;
+  let atr = market.atr;
+  if (!validPositive(atr)) atr = entry * (timeframe === "15m" ? 0.004 : (timeframe === "4h" ? 0.012 : 0.006));
+  const atrMultiplier = timeframe === "15m" ? 1.15 : (timeframe === "4h" ? 1.40 : 1.25);
+  const maxRiskPercent = timeframe === "15m" ? 0.60 : (timeframe === "4h" ? 1.50 : 0.75);
+  let stopLoss = 0, slMethod = "ATR";
+  let takeProfit = 0, tpMethod = "Dynamic-ATR";
+  const SL_BUFFER_ATR = 0.30;
+  if (direction === "LONG" && validPositive(structure.support) && structure.support < entry) {
+    let structuralSL = structure.support - atr * SL_BUFFER_ATR;
+    structuralSL = Math.min(structuralSL, entry - atr * CONFIG.MIN_SL_ATR);
+    if ((entry - structuralSL) <= (entry * (maxRiskPercent / 100))) { stopLoss = structuralSL; slMethod = "structural-support"; }
+  }
+  if (direction === "SHORT" && validPositive(structure.resistance) && structure.resistance > entry) {
+    let structuralSL = structure.resistance + atr * SL_BUFFER_ATR;
+    structuralSL = Math.max(structuralSL, entry + atr * CONFIG.MIN_SL_ATR);
+    if ((structuralSL - entry) <= (entry * (maxRiskPercent / 100))) { stopLoss = structuralSL; slMethod = "structural-resistance"; }
+  }
+  if (!validPositive(stopLoss)) {
+    stopLoss = direction === "LONG" ? (entry - atr * atrMultiplier) : (entry + atr * atrMultiplier);
+    slMethod = "ATR-" + atrMultiplier;
+  }
+  let risk = Math.abs(entry - stopLoss);
+  const bo = (CONFIG.BREAKOUT_MODE && market.breakouts) ? market.breakouts[direction] : null;
+  if (bo && validPositive(bo.level)) {
+    let boSL = direction === "LONG" ? bo.level - atr * 0.30 : bo.level + atr * 0.30;
+    boSL = direction === "LONG" ? Math.min(boSL, entry - atr * CONFIG.MIN_SL_ATR) : Math.max(boSL, entry + atr * CONFIG.MIN_SL_ATR);
+    if (Math.abs(entry - boSL) <= entry * (maxRiskPercent / 100)) { stopLoss = boSL; slMethod = "breakout-level"; risk = Math.abs(entry - stopLoss); }
+  }
+  const TP_BUFFER_ATR = 0.15;
+  if (direction === "LONG" && validPositive(structure.resistance) && structure.resistance > entry) {
+    const structuralTP = structure.resistance - atr * TP_BUFFER_ATR;
+    if (structuralTP > entry + atr * 0.5) { takeProfit = structuralTP; tpMethod = "structural-resistance"; }
+  }
+  if (direction === "SHORT" && validPositive(structure.support) && structure.support < entry) {
+    const structuralTP = structure.support + atr * TP_BUFFER_ATR;
+    if (structuralTP < entry - atr * 0.5) { takeProfit = structuralTP; tpMethod = "structural-support"; }
+  }
+  if (!validPositive(takeProfit)) {
+    let tpMultiplier = 2.0;
+    if (market.adx >= 30) tpMultiplier = 3.0; else if (market.adx >= 25) tpMultiplier = 2.5; else if (market.adx >= 20) tpMultiplier = 2.0; else tpMultiplier = 1.5;
+    takeProfit = direction === "LONG" ? entry + atr * tpMultiplier : entry - atr * tpMultiplier;
+    tpMethod = "ATR-" + tpMultiplier;
+  }
+  if (bo && risk > 0) { takeProfit = direction === "LONG" ? entry + risk * CONFIG.BREAKOUT_RR : entry - risk * CONFIG.BREAKOUT_RR; tpMethod = "breakout-" + CONFIG.BREAKOUT_RR + "R"; }
+  if (risk > 0 && Math.abs(takeProfit - entry) > risk * CONFIG.MAX_RR) {
+    takeProfit = direction === "LONG" ? entry + risk * CONFIG.MAX_RR : entry - risk * CONFIG.MAX_RR;
+    tpMethod = tpMethod + "-capped";
+  }
+  const reward = Math.abs(takeProfit - entry);
+  const rr = risk > 0 ? reward / risk : 0;
+  const roomToTP = reward;
+  const tpDistanceATR = atr > 0 ? (reward / atr) : 0;
+  const insufficientRoom = tpDistanceATR < 1.0;
+  let suggestedEntry = entry;
+  let triggerPrice = entry;
+  let invalidationPrice = stopLoss;
+  if (direction === "LONG" && validPositive(market.ema20) && market.ema20 < entry && market.ema20 > stopLoss) {
+    const ema20Pullback = market.ema20 + atr * 0.10;
+    if (ema20Pullback < entry && ema20Pullback > stopLoss) { suggestedEntry = ema20Pullback; triggerPrice = ema20Pullback; }
+  }
+  if (direction === "SHORT" && validPositive(market.ema20) && market.ema20 > entry && market.ema20 < stopLoss) {
+    const ema20Pullback = market.ema20 - atr * 0.10;
+    if (ema20Pullback > entry && ema20Pullback < stopLoss) { suggestedEntry = ema20Pullback; triggerPrice = ema20Pullback; }
+  }
+  const suggestedRisk = Math.abs(suggestedEntry - stopLoss);
+  const suggestedReward = Math.abs(takeProfit - suggestedEntry);
+  const suggestedRR = suggestedRisk > 0 ? suggestedReward / suggestedRisk : 0;
+  return {
+    entry: entry, stopLoss: stopLoss, takeProfit: takeProfit, risk: risk, reward: reward, rr: rr,
+    riskPercent: (risk / entry) * 100, slMethod: slMethod, tpMethod: tpMethod,
+    roomToTP: roomToTP, tpDistanceATR: tpDistanceATR, insufficientRoom: insufficientRoom,
+    currentPrice: entry, suggestedEntry: suggestedEntry, triggerPrice: triggerPrice,
+    invalidationPrice: invalidationPrice, suggestedRR: suggestedRR, entryImproved: suggestedEntry !== entry
+  };
+}
+
+function handleCheckQuota(data) {
+  const username = SECURITY.sanitizeString(data.username || data.userId || "", 50).trim();
+  if (!username) return jsonResponse({ error: true, message: "Username darkar hai." });
+  const ss = getSpreadsheet();
+  const quotaSheet = getOrCreateQuotaSheet(ss);
+  const user = getAndUpdateUserQuota(quotaSheet, username);
+  if (!user) return jsonResponse({ error: true, message: "User nahi mila." });
+  let planLimit = CONFIG.DEFAULT_DAILY_QUOTA;
+  const plan = String(user.premiumPlan || "").toUpperCase();
+  if (plan === "ELITE") planLimit = 20; else if (plan === "PRO") planLimit = 10; else if (plan === "BASIC") planLimit = 5;
+  else if (user.premiumSignalsPerDay > 0) planLimit = user.premiumSignalsPerDay;
+  return jsonResponse({
+    error: false, success: true, username: user.username, signalsLeft: user.signalsLeft,
+    quotaLimit: planLimit, premiumActive: user.premiumActive, premiumPlan: plan || "FREE",
+    premiumSignalsPerDay: planLimit
+  });
+}
+// ==================== GROQ AI ENGINE (Primary) ====================
+function getGroqApiKey() {
+  return PropertiesService.getScriptProperties().getProperty("GROQ_API_KEY");
+}
+
+function analyzeWithGroq(apiKey, market, symbol, timeframe) {
+  const prompt = buildGroqPrompt(market, symbol, timeframe);
+  let lastError = "";
+  let totalAttempts = 0;
+  for (let modelIndex = 0; modelIndex < CONFIG.GROQ_MODELS.length; modelIndex++) {
+    const model = CONFIG.GROQ_MODELS[modelIndex];
+    for (let retry = 0; retry < CONFIG.MODEL_RETRIES; retry++) {
+      totalAttempts++;
+      try {
+        const response = callGroq(apiKey, model, prompt);
+        let text = extractGroqText(response);
+        if (!text) throw new Error("Groq ne khaali jawab diya.");
+        text = text.trim().replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/\s*```$/i, "").trim();
+        const firstBrace = text.indexOf("{");
+        const lastBrace = text.lastIndexOf("}");
+        if (firstBrace === -1 || lastBrace === -1) throw new Error("Groq response mein JSON nahi mila.");
+        text = text.substring(firstBrace, lastBrace + 1);
+        const parsed = JSON.parse(text);
+        const direction = normalizeDirection(parsed.direction);
+        if (!direction) throw new Error("Groq ne ghalat simt di.");
+        let confidence = Number(parsed.confidence);
+        if (!Number.isFinite(confidence)) confidence = 55;
+        confidence = clamp(confidence, 20, 95);
+        return {
+          direction: direction, confidence: Math.round(confidence),
+          reasoning: String(parsed.reasoning || "Groq analysis mukammal hua."),
+          waitForPick: sanitizeWaitForPick(parsed.waitFor),
+          model: model, attempts: totalAttempts, status: "GROQ_AI"
+        };
+      } catch (error) {
+        lastError = String(error.message || error);
+        const statusCode = extractHttpStatus(error);
+        if (statusCode === 401 || statusCode === 403) {
+          return { direction: null, confidence: 40, reasoning: "Groq API tasdeeq ki kharabi: " + lastError, model: model, attempts: totalAttempts, status: "GROQ_API_KEY_ERROR" };
+        }
+        if (statusCode === 429) { if (retry < CONFIG.MODEL_RETRIES - 1) { Utilities.sleep(2000); continue; } }
+        if (isRetryableGroqError(statusCode, lastError)) {
+          if (retry < CONFIG.MODEL_RETRIES - 1) { Utilities.sleep(CONFIG.RETRY_DELAYS[Math.min(retry, CONFIG.RETRY_DELAYS.length - 1)]); continue; }
+        }
+      }
+    }
+  }
+  return { direction: null, confidence: 40, reasoning: "Groq fail. " + lastError, model: "groq-failed", attempts: totalAttempts, status: "GROQ_FAILED" };
+}
+
+function callGroq(apiKey, model, prompt) {
+  const url = "https://api.groq.com/openai/v1/chat/completions";
+  const payload = { model: model, messages: [{ role: "user", content: prompt }], temperature: 0.1, max_tokens: 2000 };
+  const response = UrlFetchApp.fetch(url, {
+    method: "post", contentType: "application/json",
+    headers: { "Authorization": "Bearer " + apiKey },
+    payload: JSON.stringify(payload), muteHttpExceptions: true
+  });
+  const status = response.getResponseCode();
+  const body = response.getContentText();
+  if (status < 200 || status >= 300) {
+    const error = new Error("Groq HTTP " + status + ": " + body.substring(0, 800));
+    error.httpStatus = status;
+    throw error;
+  }
+  return JSON.parse(body);
+}
+
+function extractGroqText(response) {
+  try { if (response && response.choices && response.choices.length > 0) return response.choices[0].message.content || ""; } catch (e) {}
+  return "";
+}
+
+function isRetryableGroqError(statusCode, message) {
+  if ([429, 500, 502, 503, 504].includes(statusCode)) return true;
+  const text = String(message || "").toLowerCase();
+  return (text.includes("rate limit") || text.includes("overloaded") || text.includes("temporarily unavailable"));
+}
+
+function buildGroqPrompt(market, symbol, timeframe) {
+  const candles = (market.recentCandles || []).slice(-CONFIG.MAX_CANDLES).map(function(c) {
+    if (Array.isArray(c)) return [Number(c[1]), Number(c[2]), Number(c[3]), Number(c[4])];
+    if (typeof c === 'object' && c.open !== undefined) return [c.open, c.high, c.low, c.close];
+    return c;
+  });
+  const waitCands = buildWaitCandidatesText(market);
+  return "Analyze " + symbol + " on " + timeframe + " timeframe.\n\n" +
+    "Current Price: " + market.currentPrice + "\n" +
+    "RSI(14): " + market.rsi + "\n" +
+    "MACD: " + market.macd + " | Signal: " + market.macdSignal + " | Histogram: " + market.macdHistogram + "\n" +
+    "ADX: " + market.adx + "\n" +
+    "ATR: " + market.atr + "\n" +
+    "Volume Ratio: " + market.volumeRatio + "x\n" +
+    "EMA20: " + market.ema20 + "\nEMA50: " + market.ema50 + "\nEMA200: " + market.ema200 + "\n" +
+    "HTF-1: RSI=" + market.tf2.rsi + " | MACD=" + market.tf2.macd + " | Signal=" + market.tf2.macdSignal + " | EMA20=" + market.tf2.ema20 + " | EMA50=" + market.tf2.ema50 + "\n" +
+    "HTF-2: RSI=" + market.tf3.rsi + " | MACD=" + market.tf3.macd + " | Signal=" + market.tf3.macdSignal + " | EMA20=" + market.tf3.ema20 + " | EMA50=" + market.tf3.ema50 + "\n\n" +
+    "News: " + (market.news || "No news") + "\n\n" +
+    "Recent 50 candles (OHLC, oldest first):\n" + JSON.stringify(candles) + "\n\n" +
+    breakoutPromptText(market) +
+    "Analyze market structure, candlestick patterns, indicator confluence.\n\n" +
+    (waitCands ? "WAIT-FOR LEVEL CANDIDATES (code-verified; choose ONLY by ID, never invent a price):\n" + waitCands + "\n\n" : "") +
+    "Respond with ONLY a JSON object in this EXACT format:\n" +
+    '{"direction": "LONG", "confidence": 75, "reasoning": "Roman Urdu mein 3-4 sentences", "waitFor": {"resistance": "R1", "support": "S1", "reason": "Roman Urdu 1-2 sentences"}}\n\n' +
+    "Rules:\n" +
+    "- waitFor: pick the ONE resistance ID (R1-R3) and ONE support ID (S1-S3) that matter most for the next valid setup.\n" +
+    "- direction: exactly LONG, SHORT, or NO_TRADE\n" +
+    "- confidence: number 0-100\n" +
+    "- reasoning: Roman Urdu, 3-4 sentences\n" +
+    "- NO_TRADE is acceptable if entry timing is poor\n" +
+    "- Trend direction ≠ Entry timing. Do not chase extended moves.\n" +
+    "- If RSI extreme (<20 or >80) + large candle + volume spike → prefer NO_TRADE\n" +
+    "- If signals strongly conflict → NO_TRADE\n" +
+    "- Do NOT force a trade. Capital preservation is priority.\n" +
+    "- CRITICAL RSI ZONE RULES:\n" +
+    "  * If RSI < 35 and you're considering SHORT → HIGH RISK of bounce. Prefer NO_TRADE or WAIT.\n" +
+    "  * If RSI > 65 and you're considering LONG → HIGH RISK of pullback. Prefer NO_TRADE or WAIT.\n" +
+    "  * Do NOT use oversold RSI as a reason to SHORT.\n" +
+    "  * Do NOT use overbought RSI as a reason to LONG.\n" +
+    "- Return ONLY JSON. No markdown, no code blocks.";
+}
+
+// ==================== Gemini Engine (Fallback) ====================
+function analyzeWithGemini(apiKey, market, symbol, timeframe) {
+  const prompt = buildGeminiPrompt(market, symbol, timeframe);
+  let lastError = "";
+  let totalAttempts = 0;
+  for (let modelIndex = 0; modelIndex < CONFIG.GEMINI_MODELS.length; modelIndex++) {
+    const model = CONFIG.GEMINI_MODELS[modelIndex];
+    for (let retry = 0; retry < CONFIG.MODEL_RETRIES; retry++) {
+      totalAttempts++;
+      try {
+        const response = callGemini(apiKey, model, prompt);
+        const text = extractGeminiText(response);
+        if (!text) throw new Error("Gemini ne khaali jawab diya.");
+        const parsed = parseGeminiJSON(text);
+        if (!parsed) throw new Error("Gemini ne ghalat JSON diya.");
+        const direction = normalizeDirection(parsed.direction);
+        if (!direction) throw new Error("Gemini ne ghalat simt di.");
+        let confidence = Number(parsed.confidence);
+        if (!Number.isFinite(confidence)) confidence = 55;
+        confidence = clamp(confidence, 20, 95);
+        return {
+          direction: direction, confidence: Math.round(confidence),
+          reasoning: String(parsed.reasoning || "Gemini analysis mukammal hua."),
+          waitForPick: sanitizeWaitForPick(parsed.waitFor),
+          model: model, attempts: totalAttempts, status: "GEMINI_AI"
+        };
+      } catch (error) {
+        lastError = String(error.message || error);
+        const statusCode = extractHttpStatus(error);
+        if (statusCode === 401 || statusCode === 403) {
+          return { direction: null, confidence: 40, reasoning: "Gemini API tasdeeq ki kharabi: " + lastError, model: model, attempts: totalAttempts, status: "GEMINI_API_KEY_ERROR" };
+        }
+        if (statusCode === 400 || statusCode === 404) break;
+        if (isRetryableGeminiError(statusCode, lastError)) {
+          if (retry < CONFIG.MODEL_RETRIES - 1) { Utilities.sleep(CONFIG.RETRY_DELAYS[Math.min(retry, CONFIG.RETRY_DELAYS.length - 1)]); continue; }
+        }
+      }
+    }
+  }
+  return { direction: null, confidence: 40, reasoning: "Tamam Gemini models nakam. " + lastError, model: "technical-fallback", attempts: totalAttempts, status: "TECHNICAL_FALLBACK" };
+}
+
+function callGemini(apiKey, model, prompt) {
+  const url = "https://generativelanguage.googleapis.com/v1beta/models/" + encodeURIComponent(model) + ":generateContent";
+  const payload = {
+    contents: [{ role: "user", parts: [{ text: prompt }] }],
+    generationConfig: {
+      temperature: 0.1, responseMimeType: "application/json",
+      responseSchema: {
+        type: "OBJECT",
+        properties: {
+          direction: { type: "STRING", enum: ["LONG", "SHORT", "NO_TRADE"] },
+          confidence: { type: "NUMBER" },
+          reasoning: { type: "STRING" },
+          waitFor: { type: "OBJECT", properties: { resistance: { type: "STRING" }, support: { type: "STRING" }, reason: { type: "STRING" } } }
+        },
+        required: ["direction", "confidence", "reasoning"]
+      }
+    }
+  };
+  const response = UrlFetchApp.fetch(url, {
+    method: "post", contentType: "application/json",
+    headers: { "x-goog-api-key": apiKey },
+    payload: JSON.stringify(payload), muteHttpExceptions: true
+  });
+  const status = response.getResponseCode();
+  const body = response.getContentText();
+  if (status < 200 || status >= 300) {
+    const error = new Error("Gemini HTTP " + status + ": " + body.substring(0, 1200));
+    error.httpStatus = status;
+    throw error;
+  }
+  return JSON.parse(body);
+}
+
+function extractGeminiText(response) {
+  try {
+    if (response && response.candidates && response.candidates.length > 0) {
+      const candidate = response.candidates[0];
+      if (candidate.content && candidate.content.parts) {
+        return candidate.content.parts.map(function(p) { return p.text || ""; }).join("").trim();
+      }
+    }
+  } catch (e) {}
+  return "";
+}
+
+function parseGeminiJSON(text) {
+  try {
+    let clean = String(text).trim().replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/\s*```$/i, "").trim();
+    const start = clean.indexOf("{");
+    const end = clean.lastIndexOf("}");
+    if (start === -1 || end === -1 || end <= start) return null;
+    clean = clean.substring(start, end + 1);
+    const parsed = JSON.parse(clean);
+    return { direction: normalizeDirection(parsed.direction), confidence: numSigned(parsed.confidence), reasoning: String(parsed.reasoning || ""), waitFor: parsed.waitFor };
+  } catch (e) { return null; }
+}
+
+function buildGeminiPrompt(market, symbol, timeframe) {
+  const candles = (market.recentCandles || []).slice(-CONFIG.MAX_CANDLES).map(function(c) {
+    if (Array.isArray(c)) return { t: c[0], o: Number(c[1]), h: Number(c[2]), l: Number(c[3]), c: Number(c[4]), v: Number(c[5]) };
+    if (c && typeof c === "object" && c.open !== undefined) return { t: c.time || c.t || c.datetime || 0, o: Number(c.open), h: Number(c.high), l: Number(c.low), c: Number(c.close), v: Number(c.volume || c.v || 0) };
+    return c;
+  });
+  const recent10 = candles.slice(-10);
+  const older40 = candles.slice(0, -10);
+  const highs = candles.map(function(c) { return c.h; }).filter(Number.isFinite);
+  const lows = candles.map(function(c) { return c.l; }).filter(Number.isFinite);
+  const volumes = candles.map(function(c) { return c.v; }).filter(Number.isFinite);
+  const highest50 = highs.length ? Math.max.apply(null, highs) : 0;
+  const lowest50 = lows.length ? Math.min.apply(null, lows) : 0;
+  const avgVolume = volumes.length ? volumes.reduce(function(a, b) { return a + b; }, 0) / volumes.length : 0;
+  const last10High = recent10.length ? Math.max.apply(null, recent10.map(function(c) { return c.h; })) : 0;
+  const last10Low = recent10.length ? Math.min.apply(null, recent10.map(function(c) { return c.l; })) : 0;
+  const waitCands = buildWaitCandidatesText(market);
+  return `
+You are an ELITE QUANTITATIVE CRYPTO ANALYST with 15+ years of experience. Analyze ${symbol} on ${timeframe} timeframe.
+
+MARKET CONTEXT
+Symbol: ${symbol}
+Timeframe: ${timeframe}
+Current Price: ${market.currentPrice}
+
+LIVE NEWS CATALYST
+${market.news}
+
+TECHNICAL INDICATORS (Primary TF)
+RSI(14): ${market.rsi}
+MACD: ${market.macd} | Signal: ${market.macdSignal} | Histogram: ${market.macdHistogram}
+ADX: ${market.adx} (${market.adx >= 25 ? "STRONG" : market.adx >= 20 ? "MODERATE" : "WEAK/CHOPPY"})
+ATR: ${market.atr}
+Volume Ratio: ${market.volumeRatio}x
+EMA20: ${market.ema20}
+EMA50: ${market.ema50}
+EMA200: ${market.ema200}
+
+HIGHER TIMEFRAME CONTEXT
+HTF-1: RSI=${market.tf2.rsi} | MACD=${market.tf2.macd} | Signal=${market.tf2.macdSignal} | EMA20=${market.tf2.ema20} | EMA50=${market.tf2.ema50}
+HTF-2: RSI=${market.tf3.rsi} | MACD=${market.tf3.macd} | Signal=${market.tf3.macdSignal} | EMA20=${market.tf3.ema20} | EMA50=${market.tf3.ema50}
+
+PRICE ACTION - LAST 50 CANDLES
+Key Ranges:
+  • 50-Candle High: ${highest50}
+  • 50-Candle Low:  ${lowest50}
+  • Last-10 High:   ${last10High}
+  • Last-10 Low:    ${last10Low}
+  • Average Volume: ${roundNumber(avgVolume, 2)}
+
+Recent 10 Candles (most recent last):
+${JSON.stringify(recent10)}
+
+Older 40 Candles:
+${JSON.stringify(older40)}
+
+WAIT-FOR LEVEL CANDIDATES (code-verified; choose ONLY by ID):
+${waitCands || "N/A"}
+
+${breakoutPromptText(market)}
+
+STEP 1 - MARKET STRUCTURE: Identify HH/HL or LH/LL. Locate support/resistance.
+STEP 2 - CANDLESTICK PATTERNS: Engulfing, pin bars, dojis, inside bars.
+STEP 3 - INDICATOR CONFLUENCE: RSI divergences? MACD histogram? EMA alignment? ADX strength?
+STEP 4 - MULTI-TIMEFRAME ALIGNMENT: Does primary TF agree with HTF-1 and HTF-2?
+STEP 5 - NEWS IMPACT: Support or contradict technical setup?
+STEP 6 - FINAL DECISION:
+   - LONG if bullish structure + MACD bullish + RSI > 50 + price above EMA20
+   - SHORT if bearish structure + MACD bearish + RSI < 50 + price below EMA20
+   - NO_TRADE is acceptable. Do not force trades.
+   - CRITICAL RSI ZONE RULES:
+     * If RSI < 35 and considering SHORT → HIGH RISK of bounce. Prefer NO_TRADE or WAIT.
+     * If RSI > 65 and considering LONG → HIGH RISK of pullback. Prefer NO_TRADE or WAIT.
+     * Do NOT use oversold RSI (below 35) as a reason to SHORT.
+     * Do NOT use overbought RSI (above 65) as a reason to LONG.
+
+CRITICAL RULES
+1. NO_TRADE is ALWAYS preferable to a low-confidence trade.
+2. Counter-trend signals MUST have confidence reduced by 15 points.
+3. If ADX < 15 AND volume ratio < 0.5, bias toward NO_TRADE.
+4. Confidence scoring: 75-95 A+, 65-74 A, 50-64 B, 40-49 C, Below 40 NO_TRADE.
+
+OUTPUT FORMAT (Strict JSON)
+{
+  "direction": "LONG" | "SHORT" | "NO_TRADE",
+  "confidence": <number 0-100>,
+  "reasoning": "<Roman Urdu, 4-6 sentences>",
+  "waitFor": { "resistance": "<R1|R2|R3>", "support": "<S1|S2|S3>", "reason": "<Roman Urdu 1-2 sentences>" }
+}
+`;
+}
+
+// ==================== Market Data Normalization ====================
+function normalizeTF(value) {
+  const v = String(value || "").toLowerCase().trim();
+  if (v === "15m" || v === "15min" || v === "15") return "15m";
+  if (v === "4h" || v === "4hr" || v === "4hour") return "4h";
+  return "1h";
+}
+
+function normalizeTFData(data) {
+  data = data || {};
+  return {
+    rsi: clamp(num(data.rsi), 0, 100),
+    macd: numSigned(data.macd),
+    macdSignal: numSigned(getFirstDefinedValue([data.macdSignal, data.macd_signal])),
+    macdHistogram: numSigned(getFirstDefinedValue([data.macdHistogram, data.macd_histogram])),
+    adx: clamp(num(data.adx), 0, 100),
+    atr: Math.max(0, num(data.atr)),
+    volumeRatio: Math.max(0, num(getFirstDefinedValue([data.volumeRatio, data.volume_ratio]))),
+    ema20: num(getFirstDefinedValue([data.ema20, data.ema_20])),
+    ema50: num(getFirstDefinedValue([data.ema50, data.ema_50])),
+    ema200: num(getFirstDefinedValue([data.ema200, data.ema_200])),
+    sma20: num(getFirstDefinedValue([data.sma20, data.sma_20])),
+    sma50: num(getFirstDefinedValue([data.sma50, data.sma_50])),
+    support: Math.max(0, num(data.support)),
+    resistance: Math.max(0, num(data.resistance))
+  };
+}
+
+function normalizeMarketData(data, timeframe) {
+  const tf1 = normalizeTFData(data.tf1 || {});
+  const tf2 = normalizeTFData(data.tf2 || {});
+  const tf3 = normalizeTFData(data.tf3 || {});
+  const source = data.market || data.indicators || data;
+  const currentPrice = firstValidNumber([source.currentPrice, source.price, data.currentPrice, data.price]);
+  const rsi = firstValidNumber([source.rsi, tf1.rsi]);
+  const macd = firstFiniteNumber([source.macd, tf1.macd]);
+  const macdSignal = firstFiniteNumber([source.macdSignal, source.macd_signal, tf1.macdSignal]);
+  let macdHistogram = firstFiniteNumber([source.macdHistogram, source.macd_histogram, tf1.macdHistogram]);
+  if (!Number.isFinite(Number(macdHistogram)) || (Number(macdHistogram) === 0 && (Number(macd) !== 0 || Number(macdSignal) !== 0))) {
+    macdHistogram = macd - macdSignal;
+  }
+  const rawCandles = data.recentCandles || data.candles || [];
+  const candles = Array.isArray(rawCandles) ? rawCandles.slice(-CONFIG.MAX_CANDLES) : [];
+  const clientTs = data.marketTimestamp ? new Date(data.marketTimestamp).getTime() : 0;
+  const now = Date.now();
+  const marketTs = (clientTs > 0 && Math.abs(now - clientTs) < 60000) ? new Date(clientTs) : new Date();
+  return {
+    currentPrice: num(currentPrice), marketTimestamp: marketTs, recentCandles: candles,
+    rsi: clamp(num(rsi), 0, 100), macd: numSigned(macd), macdSignal: numSigned(macdSignal),
+    macdHistogram: numSigned(macdHistogram),
+    adx: clamp(num(firstValidNumber([source.adx, tf1.adx])), 0, 100),
+    atr: Math.max(0, num(firstValidNumber([source.atr, tf1.atr]))),
+    volumeRatio: Math.max(0, num(firstValidNumber([source.volumeRatio, source.volume_ratio, tf1.volumeRatio]))),
+    ema20: num(firstValidNumber([source.ema20, source.ema_20, tf1.ema20])),
+    ema50: num(firstValidNumber([source.ema50, source.ema_50, tf1.ema50])),
+    ema200: num(firstValidNumber([source.ema200, source.ema_200, tf1.ema200])),
+    sma20: num(firstValidNumber([source.sma20, source.sma_20, tf1.sma20])),
+    sma50: num(firstValidNumber([source.sma50, source.sma_50, tf1.sma50])),
+    support: Math.max(0, num(firstValidNumber([source.support, tf1.support]))),
+    resistance: Math.max(0, num(firstValidNumber([source.resistance, tf1.resistance]))),
+    tf1: tf1, tf2: tf2, tf3: tf3
+  };
+}
+
+function fallbackDirection(market) {
+  let bullish = 0, bearish = 0, bullishStrong = 0, bearishStrong = 0;
+  if (validPositive(market.currentPrice) && validPositive(market.ema20)) {
+    if (market.currentPrice > market.ema20) { bullish += 2; bullishStrong++; } else if (market.currentPrice < market.ema20) { bearish += 2; bearishStrong++; }
+  }
+  if (validPositive(market.ema20) && validPositive(market.ema50)) {
+    if (market.ema20 > market.ema50) { bullish += 3; bullishStrong++; } else if (market.ema20 < market.ema50) { bearish += 3; bearishStrong++; }
+  }
+  if (validPositive(market.currentPrice) && validPositive(market.ema50)) {
+    if (market.currentPrice > market.ema50) bullish += 2; else if (market.currentPrice < market.ema50) bearish += 2;
+  }
+  if (Number.isFinite(Number(market.macd)) && Number.isFinite(Number(market.macdSignal))) {
+    if (market.macd > market.macdSignal) { bullish += 2; bullishStrong++; } else if (market.macd < market.macdSignal) { bearish += 2; bearishStrong++; }
+  }
+  if (Number.isFinite(Number(market.rsi)) && market.rsi > 0) {
+    if (market.rsi >= 55 && market.rsi < 70) { bullish += 2; bullishStrong++; } else if (market.rsi <= 45 && market.rsi > 30) { bearish += 2; bearishStrong++; }
+  }
+  let htfBullish = 0, htfBearish = 0;
+  [market.tf2, market.tf3].forEach(function(tf) {
+    if (!tf) return;
+    if (validPositive(tf.ema20) && validPositive(tf.ema50)) {
+      if (tf.ema20 > tf.ema50) htfBullish++; else if (tf.ema20 < tf.ema50) htfBearish++;
+    }
+    if (Number.isFinite(Number(tf.macd)) && Number.isFinite(Number(tf.macdSignal))) {
+      if (tf.macd > tf.macdSignal) htfBullish++; else if (tf.macd < tf.macdSignal) htfBearish++;
+    }
+  });
+  if (htfBullish > htfBearish) bullish += 3; else if (htfBearish > htfBullish) bearish += 3;
+  if (validPositive(market.currentPrice) && validPositive(market.ema200)) {
+    if (market.currentPrice > market.ema200) bullish += 2; else if (market.currentPrice < market.ema200) bearish += 2;
+  }
+  bullish = Math.max(0, bullish); bearish = Math.max(0, bearish);
+  const totalScore = bullish + bearish;
+  const scoreDifference = Math.abs(bullish - bearish);
+  if (totalScore === 0 || scoreDifference < CONFIG.FALLBACK_MIN_SCORE_DIFF || Math.max(bullishStrong, bearishStrong) < 1) return "NO_TRADE";
+  if (bullish > bearish && scoreDifference >= CONFIG.FALLBACK_MIN_SCORE_DIFF) return "LONG";
+  if (bearish > bullish && scoreDifference >= CONFIG.FALLBACK_MIN_SCORE_DIFF) return "SHORT";
+  return "NO_TRADE";
+}
+
+function detectHTFConflict(market, direction, isMacroBull, isMacroBear) {
+  if (!direction || direction === "NO_TRADE") return { conflict: false };
+  let conflict = false, conflictType = "";
+  if (direction === "SHORT" && isMacroBull) { conflict = true; conflictType = "SHORT against BULLISH HTF"; }
+  else if (direction === "LONG" && isMacroBear) { conflict = true; conflictType = "LONG against BEARISH HTF"; }
+  let htfDisagreeCount = 0;
+  const htfFrames = [market.tf2, market.tf3];
+  htfFrames.forEach(function(tf) {
+    if (!tf) return;
+    const tfBull = (validPositive(tf.ema20) && validPositive(tf.ema50) && tf.ema20 > tf.ema50);
+    const tfBear = (validPositive(tf.ema20) && validPositive(tf.ema50) && tf.ema20 < tf.ema50);
+    if (direction === "SHORT" && tfBull) htfDisagreeCount++;
+    if (direction === "LONG" && tfBear) htfDisagreeCount++;
+  });
+  return {
+    conflict: conflict, conflictType: conflictType, htfDisagreeCount: htfDisagreeCount,
+    reason: conflict ? (conflictType + " (" + htfDisagreeCount + " HTF frames disagree)") : ""
+  };
+}
+
+function detectOverextension(market, direction) {
+  if (!direction || direction === "NO_TRADE") return { overextended: false, severity: "NORMAL", score: 0 };
+  const atr = market.atr || 0;
+  const candles = market.recentCandles || [];
+  const lastCandle = candles.length > 0 ? candles[candles.length - 1] : null;
+  let candleRange = 0;
+  if (lastCandle) {
+    const hl = getCandleHL(lastCandle);
+    candleRange = (hl.h > 0 && hl.l > 0) ? Math.abs(hl.h - hl.l) : 0;
+  }
+  const candleExtension = atr > 0 ? (candleRange / atr) : 0;
+  const priceDistancePct = market.ema20 > 0 ? Math.abs(market.currentPrice - market.ema20) / market.ema20 * 100 : 0;
+  const rsiExtreme = (direction === "SHORT" && market.rsi > 0 && market.rsi < 20) || (direction === "LONG" && market.rsi > 80);
+  const largeCandle = candleExtension > 1.5;
+  const volumeSpike = market.volumeRatio >= 2.0;
+  const priceFar = priceDistancePct > 1.5;
+  let score = 0;
+  if (rsiExtreme) score += 1;
+  if (largeCandle) score += 1;
+  if (volumeSpike) score += 1;
+  if (priceFar) score += 1;
+  const extremeRSI = (direction === "SHORT" && market.rsi > 0 && market.rsi < 15) || (direction === "LONG" && market.rsi > 85);
+  const veryLargeCandle = candleExtension > 2.5;
+  const veryFarPrice = priceDistancePct > 3.0;
+  if (extremeRSI) score += 1;
+  if (veryLargeCandle) score += 1;
+  if (veryFarPrice) score += 1;
+  let severity = "NORMAL", overextended = false;
+  if (score >= 5) { severity = "STRONGLY_EXTENDED"; overextended = true; }
+  else if (score >= 3) { severity = "EXTENDED"; }
+  let reason = "";
+  if (score >= 3) {
+    const parts = [];
+    if (rsiExtreme) parts.push("RSI extreme (" + market.rsi.toFixed(2) + ")");
+    if (largeCandle) parts.push("large candle (" + candleExtension.toFixed(2) + "× ATR)");
+    if (volumeSpike) parts.push("volume spike (" + market.volumeRatio.toFixed(2) + "×)");
+    if (priceFar) parts.push("price EMA20 se " + priceDistancePct.toFixed(2) + "% door");
+    if (extremeRSI) parts.push("RSI very extreme");
+    if (veryLargeCandle) parts.push("candle very large");
+    if (veryFarPrice) parts.push("price very far from EMA20");
+    reason = parts.join(", ");
+  }
+  return { overextended: overextended, severity: severity, score: score, candleExtension: candleExtension, priceDistancePct: priceDistancePct, rsiExtreme: rsiExtreme, largeCandle: largeCandle, volumeSpike: volumeSpike, priceFar: priceFar, reason: reason };
+}
+// ==================== SIGNAL QUALITY CALCULATOR ====================
+function calculateSignalQuality(market, direction) {
+  if (!direction || direction === "NO_TRADE") return { quality: "N/A", score: 0, maxScore: 5, details: "NO_TRADE — quality not applicable" };
+  let score = 0;
+  const details = [];
+  const macd = market.macd || 0, macdSignal = market.macdSignal || 0, macdHist = market.macdHistogram || 0;
+  if (direction === "LONG") {
+    if (macd > macdSignal && macdHist > 0) { score += 1; details.push("MACD bullish aligned"); } else { details.push("MACD not aligned"); }
+  } else if (direction === "SHORT") {
+    if (macd < macdSignal && macdHist < 0) { score += 1; details.push("MACD bearish aligned"); } else { details.push("MACD not aligned"); }
+  }
+  const currentPrice = market.currentPrice || 0, ema20 = market.ema20 || 0, ema50 = market.ema50 || 0;
+  if (direction === "LONG") {
+    if (currentPrice > ema20 && ema20 > ema50) { score += 1; details.push("EMA bullish aligned"); }
+    else if (currentPrice > ema20) { details.push("EMA partially aligned"); } else { details.push("EMA not aligned"); }
+  } else if (direction === "SHORT") {
+    if (currentPrice < ema20 && ema20 < ema50) { score += 1; details.push("EMA bearish aligned"); }
+    else if (currentPrice < ema20) { details.push("EMA partially aligned"); } else { details.push("EMA not aligned"); }
+  }
+  const candles = market.recentCandles || [];
+  let structureAligned = false;
+  if (candles.length >= 6) {
+    const recent = candles.slice(-6);
+    const lows = recent.map(function(c) { return getCandleHL(c).l; });
+    const highs = recent.map(function(c) { return getCandleHL(c).h; });
+    if (direction === "LONG") {
+      const lastLow = lows[lows.length - 1], prevLow = lows[lows.length - 3];
+      structureAligned = lastLow > prevLow && lastLow > 0 && prevLow > 0;
+    } else if (direction === "SHORT") {
+      const lastHigh = highs[highs.length - 1], prevHigh = highs[highs.length - 3];
+      structureAligned = lastHigh < prevHigh && lastHigh > 0 && prevHigh > 0;
+    }
+  }
+  if (structureAligned) { score += 1; details.push("Structure aligned"); } else { details.push("Structure not aligned"); }
+  const volumeRatio = market.volumeRatio || 0;
+  if (volumeRatio >= 1.2) { score += 1; details.push("Strong volume"); }
+  else if (volumeRatio >= 0.8) { details.push("Moderate volume"); } else { details.push("Weak volume"); }
+  const adx = market.adx || 0;
+  if (adx >= 25) { score += 1; details.push("Strong trend (ADX)"); }
+  else if (adx >= 20) { details.push("Moderate trend"); } else { details.push("Weak trend"); }
+  let quality = "WEAK";
+  if (score >= 4) quality = "STRONG"; else if (score >= 2) quality = "MODERATE"; else quality = "WEAK";
+  return { quality: quality, score: score, maxScore: 5, details: details.join(", ") };
+}
+
+function calculateRSIZonePenalty(market, direction) {
+  if (!direction || direction === "NO_TRADE") return { penalty: 0, zone: "N/A", reason: "" };
+  const rsi = market.rsi || 50;
+  if (direction === "SHORT") {
+    if (rsi > 0 && rsi < 20) return { penalty: 20, zone: "EXTREME_OVERSOLD", reason: "RSI < 20 (extreme oversold) — SHORT lena exhaust risk hai" };
+    else if (rsi >= 20 && rsi < 30) return { penalty: 10, zone: "OVERSOLD", reason: "RSI 20-30 (oversold) — SHORT chase karna risky hai" };
+    else if (rsi >= 30 && rsi < 35) return { penalty: 5, zone: "APPROACHING_OVERSOLD", reason: "RSI 30-35 (approaching oversold) — savdhani rakhein" };
+  } else if (direction === "LONG") {
+    if (rsi > 80 && rsi <= 100) return { penalty: 20, zone: "EXTREME_OVERBOUGHT", reason: "RSI > 80 (extreme overbought) — LONG lena exhaust risk hai" };
+    else if (rsi > 70 && rsi <= 80) return { penalty: 10, zone: "OVERBOUGHT", reason: "RSI 70-80 (overbought) — LONG chase karna risky hai" };
+    else if (rsi > 65 && rsi <= 70) return { penalty: 5, zone: "APPROACHING_OVERBOUGHT", reason: "RSI 65-70 (approaching overbought) — savdhani rakhein" };
+    else if (rsi > 0 && rsi < 20) return { penalty: 20, zone: "EXTREME_OVERSOLD", reason: "RSI < 20 (extreme oversold) — LONG lena risky hai, bounce possible" };
+    else if (rsi >= 20 && rsi < 30) return { penalty: 10, zone: "OVERSOLD", reason: "RSI 20-30 (oversold) — LONG chase karna risky hai" };
+    else if (rsi >= 30 && rsi < 35) return { penalty: 5, zone: "APPROACHING_OVERSOLD", reason: "RSI 30-35 (approaching oversold) — savdhani rakhein" };
+  }
+  return { penalty: 0, zone: "NORMAL", reason: "" };
+}
+
+function calculateMarketStructure(market, direction) {
+  let support = validPositive(market.support) ? market.support : 0;
+  let resistance = validPositive(market.resistance) ? market.resistance : 0;
+  let source = "market-data";
+  if (support <= 0 && validPositive(market.tf2.support)) { support = market.tf2.support; source = "higher-timeframe"; }
+  if (resistance <= 0 && validPositive(market.tf2.resistance)) { resistance = market.tf2.resistance; source = "higher-timeframe"; }
+  if (support <= 0 && validPositive(market.tf3.support)) { support = market.tf3.support; source = "higher-timeframe"; }
+  if (resistance <= 0 && validPositive(market.tf3.resistance)) { resistance = market.tf3.resistance; source = "higher-timeframe"; }
+  if (support <= 0 && validPositive(market.ema50) && market.ema50 < market.currentPrice) { support = market.ema50; source = "ema-fallback"; }
+  if (resistance <= 0 && validPositive(market.ema50) && market.ema50 > market.currentPrice) { resistance = market.ema50; source = "ema-fallback"; }
+  if (direction === "LONG" && resistance > 0 && resistance <= market.currentPrice) resistance = 0;
+  if (direction === "SHORT" && support > 0 && support >= market.currentPrice) support = 0;
+  return { support: support, resistance: resistance, source: source };
+}
+
+function calculateTechnicalConfidence(market, direction, structure, trade) {
+  let score = 50;
+  const macdHist = market.macdHistogram || 0;
+  const macdHistAbs = Math.abs(macdHist);
+  if (direction === "LONG") {
+    if (market.macd > market.macdSignal) { score += 8; if (macdHist > 0) score += 3; }
+    else if (market.macd < market.macdSignal) { score -= 8; if (macdHist < 0 && macdHistAbs < Math.abs(market.macd * 0.5)) score += 3; }
+  } else if (direction === "SHORT") {
+    if (market.macd < market.macdSignal) { score += 8; if (macdHist < 0) score += 3; }
+    else if (market.macd > market.macdSignal) { score -= 8; if (macdHist > 0 && macdHistAbs < Math.abs(market.macd * 0.5)) score += 3; }
+  }
+  if (direction === "LONG" && market.currentPrice > market.ema20 && market.ema20 > market.ema50) score += 8;
+  if (direction === "SHORT" && market.currentPrice < market.ema20 && market.ema20 < market.ema50) score += 8;
+  if (market.adx >= 25) score += 8; else if (market.adx >= 20) score += 3; else if (market.adx > 0) score -= 8;
+  if (market.volumeRatio >= 1.20) score += 8; else if (market.volumeRatio >= 0.80) score += 3; else if (market.volumeRatio < 0.50 && market.volumeRatio > 0) score -= 10;
+  if (direction === "LONG") { if (market.rsi >= 50 && market.rsi <= 65) score += 5; }
+  else if (direction === "SHORT") { if (market.rsi >= 35 && market.rsi <= 50) score += 5; }
+  if (trade.rr >= 2) score += 5; else if (trade.rr < 1) score -= 10;
+  const tf2Bullish = (market.tf2 && market.tf2.ema20 > market.tf2.ema50);
+  const tf2Bearish = (market.tf2 && market.tf2.ema20 < market.tf2.ema50);
+  if (direction === "LONG" && tf2Bearish) score -= 5;
+  if (direction === "SHORT" && tf2Bullish) score -= 5;
+  return clamp(Math.round(score), 15, 95);
+}
+
+function calculateFinalConfidence(aiConfidence, technicalConfidence, market, direction, trade, structure) {
+  let confidence = (aiConfidence * 0.50) + (technicalConfidence * 0.50);
+  if (market.adx > 0 && market.adx < 15) confidence -= 5;
+  if (market.volumeRatio > 0 && market.volumeRatio < 0.40) confidence -= 6;
+  if (trade.rr < 1) confidence -= 8;
+  return clamp(Math.round(confidence), 20, 95);
+}
+
+function buildReasoning(market, direction, structure, trade, aiReasoning, technicalFallback) {
+  if (technicalFallback) {
+    if (direction === "LONG") return "Technical fallback ne bullish tasdeeq ki bunyad par LONG muntakhib kiya. " + aiReasoning;
+    if (direction === "SHORT") return "Technical fallback ne bearish tasdeeq ki bunyad par SHORT muntakhib kiya. " + aiReasoning;
+    return "Market ghair mustahkam hai. NO_TRADE. " + aiReasoning;
+  }
+  return aiReasoning || ("Simt " + direction + " ki tasdeeq ho gayi.");
+}
+
+function buildWarnings(market, direction) {
+  const warnings = [];
+  const volatilityPercent = market.currentPrice > 0 ? (market.atr / market.currentPrice) * 100 : 0;
+  if (volatilityPercent > 2.0) warnings.push("[RISK MANAGEMENT] Zyada utar charhao (" + volatilityPercent.toFixed(1) + "%). Leverage 3x-5x rakhein aur 50% margin istemal karein.");
+  else if (volatilityPercent < 0.5 && volatilityPercent > 0) warnings.push("[RISK MANAGEMENT] Kam utar charhao. Market sideways hai, trailing SL zaroor istemal karein.");
+  if (market.news && market.news !== "No recent major macro news detected.") warnings.push("[NEWS RADAR] Haal ki exchange announcements market trend par asar daal sakti hain.");
+  if (market.volumeRatio > 0 && market.volumeRatio < 0.50) warnings.push("[WARNING] Volume ausat se kam hai (" + market.volumeRatio.toFixed(2) + "x).");
+  if (market.adx > 0 && market.adx < 20) warnings.push("[WARNING] ADX < 20. Trend ki raftaar kamzor hai.");
+  return warnings;
+}
+
+// ==================== Quota Management ====================
+function getOrCreateQuotaSheet(ss) {
+  let sheet = ss.getSheetByName(SHEETS.QUOTA);
+  if (!sheet) sheet = ss.insertSheet(SHEETS.QUOTA);
+  if (sheet.getLastRow() === 0) { sheet.appendRow(QUOTA_REQUIRED_COLUMNS); return sheet; }
+  const existing = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), 1)).getValues()[0].map(function(v) { return String(v || "").trim(); });
+  if (existing[0] !== "Username") {
+    if (existing.filter(function(h) { return h; }).length === 0) {
+      sheet.getRange(1, 1, 1, QUOTA_REQUIRED_COLUMNS.length).setValues([QUOTA_REQUIRED_COLUMNS]);
+      return sheet;
+    }
+  }
+  ensureQuotaColumns(sheet);
+  return sheet;
+}
+
+function getUserQuotaRow(sheet, username) {
+  const cache = CacheService.getScriptCache();
+  const cacheKey = "user_" + username.toLowerCase();
+  const cached = cache.get(cacheKey);
+  if (cached) { try { const c = JSON.parse(cached); if (c && c.username) return c; } catch (e) {} }
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return null;
+  const colMap = getQuotaColumnMap(sheet);
+  const maxCol = Math.max(sheet.getLastColumn(), 1);
+  const values = sheet.getRange(2, 1, lastRow - 1, maxCol).getValues();
+  for (let i = 0; i < values.length; i++) {
+    const u = String(values[i][0] || "").trim().toLowerCase();
+    if (u === username.toLowerCase()) {
+      const user = {
+        row: i + 2, username: String(values[i][0] || "").trim(), password: String(values[i][1] || "").trim(),
+        signalsLeft: Number(values[i][2]) || 0, lastUsed: values[i][3],
+        referralCode: colMap.ReferralCode ? String(values[i][colMap.ReferralCode - 1] || "").trim() : "",
+        referralCount: colMap.ReferralCount ? Number(values[i][colMap.ReferralCount - 1]) || 0 : 0,
+        referralBonus: colMap.ReferralBonus ? Number(values[i][colMap.ReferralBonus - 1]) || 0 : 0,
+        premiumPlan: colMap.PremiumPlan ? String(values[i][colMap.PremiumPlan - 1] || "").trim() : "",
+        premiumExpiry: colMap.PremiumExpiry ? values[i][colMap.PremiumExpiry - 1] : null,
+        premiumSignalsPerDay: colMap.PremiumSignalsPerDay ? Number(values[i][colMap.PremiumSignalsPerDay - 1]) || 0 : 0
+      };
+      cache.put(cacheKey, JSON.stringify(user), 60);
+      return user;
+    }
+  }
+  return null;
+}
+
+function updateUserCache(username, password, signalsLeft, lastUsed) {
+  const cache = CacheService.getScriptCache();
+  const user = { row: 0, username: username, password: password, signalsLeft: signalsLeft, lastUsed: lastUsed };
+  cache.put("user_" + username.toLowerCase(), JSON.stringify(user), CONFIG.CACHE_TTL_USER);
+}
+
+function getAndUpdateUserQuota(sheet, username) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const user = getUserQuotaRow(sheet, username);
+    if (!user) return null;
+    const colMap = getQuotaColumnMap(sheet);
+    const today = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, "yyyy-MM-dd");
+    const lastUsedDate = normalizeSheetDate(user.lastUsed);
+    let premiumActive = false, premiumPlan = "", premiumSignalsPerDay = 0;
+    if (user.premiumPlan && user.premiumExpiry) {
+      const expiry = user.premiumExpiry instanceof Date ? user.premiumExpiry : new Date(user.premiumExpiry);
+      if (!isNaN(expiry.getTime()) && expiry > new Date()) {
+        premiumActive = true; premiumPlan = user.premiumPlan; premiumSignalsPerDay = user.premiumSignalsPerDay || 0;
+      }
+    }
+    const dailyQuota = premiumActive ? premiumSignalsPerDay : CONFIG.DEFAULT_DAILY_QUOTA;
+    const totalAllowedToday = dailyQuota + (user.referralBonus || 0);
+    let signals = Number.isFinite(user.signalsLeft) ? user.signalsLeft : totalAllowedToday;
+    if (lastUsedDate && lastUsedDate !== today) {
+      signals = totalAllowedToday;
+      if (colMap.Signals_Left) sheet.getRange(user.row, colMap.Signals_Left).setValue(signals);
+      if (colMap.Last_Used_Time) sheet.getRange(user.row, colMap.Last_Used_Time).setValue(new Date());
+      CacheService.getScriptCache().remove("user_" + username.toLowerCase());
+    }
+    return {
+      row: user.row, username: user.username, password: user.password, signalsLeft: signals, lastUsed: user.lastUsed,
+      referralCode: user.referralCode, referralCount: user.referralCount, referralBonus: user.referralBonus,
+      premiumActive: premiumActive, premiumPlan: premiumPlan, premiumSignalsPerDay: premiumSignalsPerDay
+    };
+  } finally { lock.releaseLock(); }
+}
+
+function normalizeSheetDate(value) {
+  if (value instanceof Date) return Utilities.formatDate(value, CONFIG.TIMEZONE, "yyyy-MM-dd");
+  const text = String(value || "").trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+  const parsed = new Date(text);
+  if (!isNaN(parsed.getTime())) return Utilities.formatDate(parsed, CONFIG.TIMEZONE, "yyyy-MM-dd");
+  return "";
+}
+
+// ==================== Quota Consumption (FINAL - Guarded versions) ====================
+function consumeQuota(sheet, userRow, currentSignals) {
+  if (!userRow || userRow < 2) return 0;
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const live = Number(sheet.getRange(userRow, 3).getValue());
+    const base = Number.isFinite(live) ? live : currentSignals;
+    const newSignals = Math.max(0, base - 1);
+    sheet.getRange(userRow, 3, 1, 2).setValues([[newSignals, new Date()]]);
+    const username = sheet.getRange(userRow, 1).getValue();
+    CacheService.getScriptCache().remove("user_" + String(username).toLowerCase());
+    return newSignals;
+  } finally { lock.releaseLock(); }
+}
+
+function consumePartialQuota(sheet, userRow, currentSignals, cost) {
+  if (!userRow || userRow < 2) return 0;
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const live = Number(sheet.getRange(userRow, 3).getValue());
+    const base = Number.isFinite(live) ? live : currentSignals;
+    const newSignals = Math.max(0, base - cost);
+    sheet.getRange(userRow, 3, 1, 2).setValues([[newSignals, new Date()]]);
+    const username = sheet.getRange(userRow, 1).getValue();
+    CacheService.getScriptCache().remove("user_" + String(username).toLowerCase());
+    return newSignals;
+  } finally { lock.releaseLock(); }
+}
+
+// ==================== News Fetch ====================
+function fetchMarketNews() {
+  const cache = CacheService.getScriptCache();
+  const cached = cache.get("binance_news");
+  if (cached) return cached;
+  try {
+    const url = "https://www.binance.com/bapi/composite/v1/public/cms/article/list/query?type=1&pageNo=1&pageSize=5";
+    const options = { muteHttpExceptions: true, headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" } };
+    const response = UrlFetchApp.fetch(url, options);
+    if (response.getResponseCode() === 200) {
+      const json = JSON.parse(response.getContentText());
+      let articlesList = [];
+      if (json && json.data && json.data.catalogs && json.data.catalogs.length > 0) {
+        json.data.catalogs.forEach(function(catalog) { if (catalog.articles && catalog.articles.length > 0) articlesList = articlesList.concat(catalog.articles); });
+      } else if (json && json.data && json.data.articles) { articlesList = json.data.articles; }
+      if (articlesList.length > 0) {
+        const headlines = articlesList.slice(0, 3).map(function(a) { return a.title; }).join(" | ");
+        cache.put("binance_news", headlines, CONFIG.CACHE_TTL_NEWS);
+        return headlines;
+      }
+    }
+  } catch (e) { Logger.log("News fetch exception: " + e.message); }
+  return "No recent major macro news detected.";
+}
+
+// ==================== Sheet Helpers ====================
+function getGeminiApiKey() { return PropertiesService.getScriptProperties().getProperty("GEMINI_API_KEY"); }
+
+function getSpreadsheet() {
+  const props = PropertiesService.getScriptProperties();
+  const sheetId = props.getProperty("SHEET_ID");
+  if (sheetId) return SpreadsheetApp.openById(sheetId);
+  const active = SpreadsheetApp.getActiveSpreadsheet();
+  if (active) return active;
+  throw new Error("Spreadsheet dastiyab nahi. Script Properties mein SHEET_ID shamil karein.");
+}
+
+function getOrCreateJournalSheet(ss) {
+  let sheet = ss.getSheetByName(SHEETS.JOURNAL);
+  if (!sheet) sheet = ss.insertSheet(SHEETS.JOURNAL);
+  ensureJournalHeader(sheet);
+  return sheet;
+}
+
+function getOrCreateSheet(ss, name, headers) {
+  let sheet = ss.getSheetByName(name);
+  if (!sheet) { sheet = ss.insertSheet(name); sheet.appendRow(headers); }
+  else if (sheet.getLastRow() === 0) sheet.appendRow(headers);
+  return sheet;
+}
+
+function getOrCreateReferralsSheet(ss) { return getOrCreateSheet(ss, SHEETS.REFERRALS, REFERRAL_HEADERS); }
+function getOrCreateSharesSheet(ss) { return getOrCreateSheet(ss, SHEETS.SHARES, SHARE_HEADERS); }
+function getOrCreateSuggestionsSheet(ss) { return getOrCreateSheet(ss, SHEETS.SUGGESTIONS, SUGGESTION_HEADERS); }
+function getOrCreatePremiumSheet(ss) { return getOrCreateSheet(ss, SHEETS.PREMIUM, PREMIUM_HEADERS); }
+function getOrCreatePremiumCodesSheet(ss) { return getOrCreateSheet(ss, SHEETS.PREMIUM_CODES, PREMIUM_CODE_HEADERS); }
+
+function ensureQuotaColumns(sheet) {
+  const lastCol = Math.max(sheet.getLastColumn(), 1);
+  const existing = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(function(v) { return String(v || "").trim(); });
+  const toAdd = [];
+  for (let i = 0; i < QUOTA_REQUIRED_COLUMNS.length; i++) { if (existing.indexOf(QUOTA_REQUIRED_COLUMNS[i]) === -1) toAdd.push(QUOTA_REQUIRED_COLUMNS[i]); }
+  if (toAdd.length > 0) sheet.getRange(1, lastCol + 1, 1, toAdd.length).setValues([toAdd]);
+}
+
+function getQuotaColumnMap(sheet) {
+  const lastCol = Math.max(sheet.getLastColumn(), 1);
+  const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(function(v) { return String(v || "").trim(); });
+  const map = {};
+  headers.forEach(function(h, i) { if (h) map[h] = i + 1; });
+  return map;
+}
+
+function ensureJournalHeader(sheet) {
+  if (sheet.getLastRow() === 0) { sheet.appendRow(JOURNAL_HEADERS); return; }
+  const existing = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), 1)).getValues()[0];
+  const existingCount = existing.filter(function(v) { return String(v || "").trim() !== ""; }).length;
+  if (existingCount < JOURNAL_HEADERS.length) {
+    sheet.getRange(1, existingCount + 1, 1, JOURNAL_HEADERS.length - existingCount).setValues([JOURNAL_HEADERS.slice(existingCount)]);
+  }
+}
+
+function appendJournal(sheet, timestamp, symbol, timeframe, direction, confidence, aiConfidence, technicalConfidence, trade, market, structure, model, attempts, warnings, reasoning, userId) {
+  const atrPercent = (market.currentPrice > 0 && market.atr > 0) ? ((market.atr / market.currentPrice) * 100) : 0;
+  const outcomeStatus = (direction === "LONG" || direction === "SHORT") ? "OPEN" : "N/A";
+  const safeReasoning = String(reasoning || "").substring(0, CONFIG.MAX_REASONING_LENGTH);
+  
+  // Calculate multi-targets
+  const entry = Number(trade.entry);
+  const tp = Number(trade.takeProfit);
+  const fullReward = Math.abs(tp - entry);
+  const tp1 = direction === "LONG" ? (entry + fullReward * 0.5) : (entry - fullReward * 0.5);
+  const tp2 = tp;
+  const tp3 = direction === "LONG" ? (entry + fullReward * 1.5) : (entry - fullReward * 1.5);
+
+  sheet.appendRow([
+    timestamp, symbol, timeframe, direction, confidence, aiConfidence, technicalConfidence,
+    trade.entry, trade.stopLoss, trade.takeProfit, trade.rr, trade.riskPercent, atrPercent, market.atr,
+    market.rsi, market.macd, market.macdSignal, market.adx, market.volumeRatio,
+    structure.support, structure.resistance, trade.slMethod, trade.tpMethod,
+    model, attempts, "", warnings.join(" | "), safeReasoning, userId, outcomeStatus, "", "",
+    tp1, tp2, tp3, "NO", "NO", "NO", "OPEN"
+  ]);
+}
+
+// ==================== Outcome Tracking ====================
+function checkAndUpdateOutcomes() {
+  const ss = getSpreadsheet();
+  const sheet = getOrCreateJournalSheet(ss);
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+  const now = new Date();
+  const totalCols = Math.max(sheet.getLastColumn(), 39);
+  const values = sheet.getRange(2, 1, lastRow - 1, totalCols).getValues();
+
+  for (let i = 0; i < values.length; i++) {
+    const row = values[i];
+    const direction = String(row[COL.DIRECTION - 1] || "");
+    const outcome = String(row[COL.OUTCOME - 1] || "").toUpperCase();
+    if (direction !== "LONG" && direction !== "SHORT") continue;
+    if (outcome !== "OPEN" && outcome !== "") continue;
+    
+    const timestamp = row[COL.TIMESTAMP - 1];
+    const symbol = String(row[COL.SYMBOL - 1] || "");
+    const timeframe = String(row[COL.TIMEFRAME - 1] || "1h");
+    const entry = Number(row[COL.ENTRY - 1]);
+    const stopLoss = Number(row[COL.STOPLOSS - 1]);
+    const takeProfit = Number(row[COL.TAKEPROFIT - 1]);
+    
+    if (!symbol || !validPositive(entry) || !validPositive(stopLoss) || !validPositive(takeProfit)) continue;
+    
+    try {
+      const fullReward = Math.abs(takeProfit - entry);
+      const tp1 = direction === "LONG" ? (entry + fullReward * 0.5) : (entry - fullReward * 0.5);
+      const tp2 = takeProfit;
+      const tp3 = direction === "LONG" ? (entry + fullReward * 1.5) : (entry - fullReward * 1.5);
+      
+      const result = evaluateSignalOutcome(symbol, timeframe, timestamp, direction, entry, stopLoss, tp1, tp2, tp3, now);
+      if (result.outcome !== "OPEN") {
+        // Write Outcome, ClosedPrice, ClosedTime
+        sheet.getRange(i + 2, COL.OUTCOME, 1, 3).setValues([[result.outcome, result.closedPrice, result.closedTime]]);
+        // Write TP1_Hit, TP2_Hit, TP3_Hit, TargetHit (Cols 36 to 39)
+        sheet.getRange(i + 2, 36, 1, 4).setValues([[result.tp1Hit, result.tp2Hit, result.tp3Hit, result.targetHit]]);
+      }
+    } catch (e) {
+      Logger.log("Outcome check error for row " + (i + 2) + ": " + e.message);
+    }
+  }
+}
+
+function evaluateSignalOutcome(symbol, timeframe, signalTime, direction, entry, stopLoss, tp1, tp2, tp3, now) {
+  const startTime = new Date(signalTime).getTime();
+  const endTime = now.getTime();
+  const hoursElapsed = (endTime - startTime) / (1000 * 60 * 60);
+  if (hoursElapsed > CONFIG.MAX_HOLD_HOURS) {
+    return { outcome: "EXPIRED", closedPrice: 0, closedTime: now.toISOString(), tp1Hit: "NO", tp2Hit: "NO", tp3Hit: "NO", targetHit: "EXPIRED" };
+  }
+  
+  try {
+    const baseCoin = symbol.replace(/USDT$/, "").replace(/USD$/, "");
+    const apiKey = PropertiesService.getScriptProperties().getProperty("CRYPTOCOMPARE_API_KEY");
+    if (!apiKey) { return { outcome: "OPEN" }; }
+    
+    let endpoint = timeframe === "15m" ? "histominute" : "histohour";
+    const url = "https://min-api.cryptocompare.com/data/v2/" + endpoint + "?fsym=" + baseCoin + "&tsym=USDT&limit=2000&toTs=" + Math.floor(endTime / 1000) + "&api_key=" + apiKey;
+    const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    if (response.getResponseCode() !== 200) return { outcome: "OPEN" };
+    
+    const json = JSON.parse(response.getContentText());
+    if (!json || !json.Data || !json.Data.Data || json.Data.Data.length === 0) return { outcome: "OPEN" };
+    
+    const candles = json.Data.Data;
+    const signalTimeSec = Math.floor(startTime / 1000);
+    
+    let tp1Hit = false, tp2Hit = false, tp3Hit = false;
+    let hitPrice = 0, hitTime = "";
+
+    for (let i = 0; i < candles.length; i++) {
+      const candle = candles[i];
+      if (candle.time < signalTimeSec) continue;
+      const high = Number(candle.high), low = Number(candle.low);
+      const closeTime = new Date(candle.time * 1000).toISOString();
+
+      if (direction === "LONG") {
+        if (high >= tp3) { tp1Hit = true; tp2Hit = true; tp3Hit = true; hitPrice = tp3; hitTime = closeTime; }
+        else if (high >= tp2) { tp1Hit = true; tp2Hit = true; hitPrice = tp2; hitTime = closeTime; }
+        else if (high >= tp1) { tp1Hit = true; hitPrice = tp1; hitTime = closeTime; }
+
+        if (tp1Hit) {
+          // Once TP1 is hit, it is counted as a WIN
+          return { outcome: "WIN", closedPrice: hitPrice, closedTime: hitTime, tp1Hit: "YES", tp2Hit: tp2Hit ? "YES" : "NO", tp3Hit: tp3Hit ? "YES" : "NO", targetHit: tp3Hit ? "TP3" : (tp2Hit ? "TP2" : "TP1") };
+        }
+        if (low <= stopLoss) {
+          return { outcome: "LOSS", closedPrice: stopLoss, closedTime: closeTime, tp1Hit: "NO", tp2Hit: "NO", tp3Hit: "NO", targetHit: "SL" };
+        }
+      } else if (direction === "SHORT") {
+        if (low <= tp3) { tp1Hit = true; tp2Hit = true; tp3Hit = true; hitPrice = tp3; hitTime = closeTime; }
+        else if (low <= tp2) { tp1Hit = true; tp2Hit = true; hitPrice = tp2; hitTime = closeTime; }
+        else if (low <= tp1) { tp1Hit = true; hitPrice = tp1; hitTime = closeTime; }
+
+        if (tp1Hit) {
+          return { outcome: "WIN", closedPrice: hitPrice, closedTime: hitTime, tp1Hit: "YES", tp2Hit: tp2Hit ? "YES" : "NO", tp3Hit: tp3Hit ? "YES" : "NO", targetHit: tp3Hit ? "TP3" : (tp2Hit ? "TP2" : "TP1") };
+        }
+        if (high >= stopLoss) {
+          return { outcome: "LOSS", closedPrice: stopLoss, closedTime: closeTime, tp1Hit: "NO", tp2Hit: "NO", tp3Hit: "NO", targetHit: "SL" };
+        }
+      }
+    }
+    return { outcome: "OPEN" };
+  } catch (e) {
+    return { outcome: "OPEN" };
+  }
+}
+
+function evaluateSignalOutcome(symbol, timeframe, signalTime, direction, stopLoss, takeProfit, now) {
+  const startTime = new Date(signalTime).getTime();
+  const endTime = now.getTime();
+  const hoursElapsed = (endTime - startTime) / (1000 * 60 * 60);
+  if (hoursElapsed > CONFIG.MAX_HOLD_HOURS) return { outcome: "EXPIRED", closedPrice: 0, closedTime: now.toISOString() };
+  try {
+    const baseCoin = symbol.replace(/USDT$/, "").replace(/USD$/, "");
+    const apiKey = PropertiesService.getScriptProperties().getProperty("CRYPTOCOMPARE_API_KEY");
+    if (!apiKey) { Logger.log("CRYPTOCOMPARE_API_KEY set nahi hai"); return { outcome: "OPEN" }; }
+    let endpoint = "histohour";
+    if (timeframe === "15m") endpoint = "histominute";
+    else if (timeframe === "4h") endpoint = "histohour";
+    const url = "https://min-api.cryptocompare.com/data/v2/" + endpoint + "?fsym=" + baseCoin + "&tsym=USDT&limit=2000&toTs=" + Math.floor(endTime / 1000) + "&api_key=" + apiKey;
+    const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    if (response.getResponseCode() !== 200) { Logger.log("CryptoCompare fail for " + symbol + ": " + response.getResponseCode()); return { outcome: "OPEN" }; }
+    const json = JSON.parse(response.getContentText());
+    if (!json || !json.Data || !json.Data.Data || json.Data.Data.length === 0) { Logger.log("CryptoCompare data empty for " + symbol); return { outcome: "OPEN" }; }
+    const candles = json.Data.Data;
+    const signalTimeSec = Math.floor(startTime / 1000);
+    for (let i = 0; i < candles.length; i++) {
+      const candle = candles[i];
+      if (candle.time < signalTimeSec) continue;
+      const high = Number(candle.high), low = Number(candle.low);
+      const closeTime = new Date(candle.time * 1000).toISOString();
+      if (direction === "LONG") {
+        if (low <= stopLoss) return { outcome: "LOSS", closedPrice: stopLoss, closedTime: closeTime };
+        if (high >= takeProfit) return { outcome: "WIN", closedPrice: takeProfit, closedTime: closeTime };
+      } else if (direction === "SHORT") {
+        if (high >= stopLoss) return { outcome: "LOSS", closedPrice: stopLoss, closedTime: closeTime };
+        if (low <= takeProfit) return { outcome: "WIN", closedPrice: takeProfit, closedTime: closeTime };
+      }
+    }
+    return { outcome: "OPEN" };
+  } catch (e) { Logger.log("evaluateSignalOutcome error: " + e.message); return { outcome: "OPEN" }; }
+}
+
+// ==================== Accuracy Report ====================
+function getAccuracyReport() {
+  const ss = getSpreadsheet();
+  const sheet = getOrCreateJournalSheet(ss);
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return { totalClosed: 0, wins: 0, losses: 0, expired: 0, winRate: 0, tp1Wins: 0, tp2Wins: 0, tp3Wins: 0, byConfidenceBucket: {} };
+
+  const totalCols = Math.max(sheet.getLastColumn(), 39);
+  const values = sheet.getRange(2, 1, lastRow - 1, totalCols).getValues();
+
+  let wins = 0, losses = 0, expired = 0;
+  let tp1Wins = 0, tp2Wins = 0, tp3Wins = 0;
+  const byConfidenceBucket = {};
+
+  values.forEach(function(row) {
+    const outcome = String(row[COL.OUTCOME - 1] || "").toUpperCase();
+    const confidence = Number(row[COL.CONFIDENCE - 1]) || 0;
+    const targetHit = String(row[38] || "").toUpperCase(); // Col 39 (0-indexed: 38)
+    const tp1HitVal = String(row[35] || "").toUpperCase(); // Col 36 (0-indexed: 35)
+    const tp2HitVal = String(row[36] || "").toUpperCase(); // Col 37 (0-indexed: 36)
+    const tp3HitVal = String(row[37] || "").toUpperCase(); // Col 38 (0-indexed: 37)
+
+    const isWin = outcome === "WIN" || tp1HitVal === "YES" || targetHit.indexOf("TP") !== -1;
+    const isLoss = outcome === "LOSS" || targetHit === "SL";
+
+    if (isWin || isLoss) {
+      let bucket;
+      if (confidence >= 70) bucket = "70+";
+      else if (confidence >= 60) bucket = "60-69";
+      else if (confidence >= 55) bucket = "55-59";
+      else bucket = "under-55";
+
+      if (!byConfidenceBucket[bucket]) byConfidenceBucket[bucket] = { wins: 0, total: 0 };
+      byConfidenceBucket[bucket].total++;
+
+      if (isWin) {
+        wins++;
+        byConfidenceBucket[bucket].wins++;
+
+        if (targetHit === "TP3" || tp3HitVal === "YES") tp3Wins++;
+        else if (targetHit === "TP2" || tp2HitVal === "YES") tp2Wins++;
+        else tp1Wins++;
+      } else {
+        losses++;
+      }
+    } else if (outcome === "EXPIRED" || targetHit === "EXPIRED") {
+      expired++;
+    }
+  });
+
+  Object.keys(byConfidenceBucket).forEach(function(bucket) {
+    const b = byConfidenceBucket[bucket];
+    b.winRate = b.total > 0 ? Math.round((b.wins / b.total) * 1000) / 10 : 0;
+  });
+
+  const totalClosed = wins + losses;
+  return {
+    totalClosed: totalClosed,
+    wins: wins,
+    losses: losses,
+    expired: expired,
+    winRate: totalClosed > 0 ? Math.round((wins / totalClosed) * 1000) / 10 : 0,
+    tp1Wins: tp1Wins,
+    tp2Wins: tp2Wins,
+    tp3Wins: tp3Wins,
+    byConfidenceBucket: byConfidenceBucket
+  };
+}
+
+function handleAccuracyReport(data) {
+  const report = getAccuracyReport();
+  return jsonResponse(Object.assign({ error: false, success: true }, report));
+}
+
+// ==================== Frontend Outcome Support ====================
+function isOutcomeAuthorized(data) {
+  const key = PropertiesService.getScriptProperties().getProperty("OUTCOME_KEY");
+  if (!key) return true;
+  return String((data && data.outcomeKey) || "").trim() === key;
+}
+
+function handleCheckLock(data) {
+  if (!isOutcomeAuthorized(data)) return jsonResponse({ error: true, message: "Ghair mujaz darkhwast." });
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const lastRun = Number(props.getProperty("OUTCOME_LAST_RUN") || "0");
+    const now = Date.now();
+    const thirtyMin = 30 * 60 * 1000;
+    const canRun = (now - lastRun) >= thirtyMin;
+    return jsonResponse({ error: false, canRun: canRun, lastRun: lastRun, nextRun: lastRun + thirtyMin });
+  } catch (e) { return jsonResponse({ error: true, message: e.message }); }
+}
+
+function handleSetLock(data) {
+  if (!isOutcomeAuthorized(data)) return jsonResponse({ error: true, message: "Ghair mujaz darkhwast." });
+  try {
+    const props = PropertiesService.getScriptProperties();
+    props.setProperty("OUTCOME_LAST_RUN", String(Date.now()));
+    return jsonResponse({ error: false, success: true });
+  } catch (e) { return jsonResponse({ error: true, message: e.message }); }
+}
+
+function handleGetOpenSignals(data) {
+  if (!isOutcomeAuthorized(data)) return jsonResponse({ error: true, message: "Ghair mujaz darkhwast." });
+  try {
+    const ss = getSpreadsheet();
+    const sheet = getOrCreateJournalSheet(ss);
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) return jsonResponse({ error: false, signals: [] });
+    const values = sheet.getRange(2, 1, lastRow - 1, JOURNAL_HEADERS.length).getValues();
+    const signals = [];
+    for (let i = 0; i < values.length; i++) {
+      const row = values[i];
+      const direction = String(row[COL.DIRECTION - 1] || "");
+      const outcome = String(row[COL.OUTCOME - 1] || "").toUpperCase();
+      if (direction !== "LONG" && direction !== "SHORT") continue;
+      if (outcome !== "OPEN" && outcome !== "") continue;
+      const entry = Number(row[COL.ENTRY - 1]), sl = Number(row[COL.STOPLOSS - 1]), tp = Number(row[COL.TAKEPROFIT - 1]);
+      if (!validPositive(entry) || !validPositive(sl) || !validPositive(tp)) continue;
+      signals.push({ row: i + 2, timestamp: row[COL.TIMESTAMP - 1], symbol: row[COL.SYMBOL - 1], timeframe: row[COL.TIMEFRAME - 1], direction: direction, entry: entry, stopLoss: sl, takeProfit: tp });
+    }
+    return jsonResponse({ error: false, signals: signals });
+  } catch (e) { return jsonResponse({ error: true, message: e.message }); }
+}
+
+function handleUpdateOutcome(data) {
+  if (!isOutcomeAuthorized(data)) return jsonResponse({ error: true, message: "Ghair mujaz darkhwast." });
+  try {
+    const row = Number(data.row);
+    const outcome = String(data.outcome || "").toUpperCase();
+    const closedPrice = Number(data.closedPrice) || 0;
+    const closedTime = String(data.closedTime || "");
+    if (!row || !outcome) return jsonResponse({ error: true, message: "Invalid data" });
+    const ss = getSpreadsheet();
+    const sheet = getOrCreateJournalSheet(ss);
+    if (["WIN", "LOSS", "EXPIRED"].indexOf(outcome) === -1) return jsonResponse({ error: true, message: "Invalid outcome" });
+    if (row < 2 || row > sheet.getLastRow()) return jsonResponse({ error: true, message: "Invalid row" });
+    const currentOutcome = String(sheet.getRange(row, COL.OUTCOME).getValue() || "").toUpperCase();
+    if (currentOutcome !== "OPEN" && currentOutcome !== "") return jsonResponse({ error: true, message: "Signal pehle hi close ho chuka hai." });
+    sheet.getRange(row, COL.OUTCOME, 1, 3).setValues([[outcome, closedPrice, closedTime]]);
+    return jsonResponse({ error: false, success: true });
+  } catch (e) { return jsonResponse({ error: true, message: e.message }); }
+}
+
+// ==================== Utilities ====================
+function getCandleHL(c) {
+  if (Array.isArray(c)) return { h: Number(c[2]) || 0, l: Number(c[3]) || 0 };
+  if (c && typeof c === "object") return { h: Number(c.high || c.h) || 0, l: Number(c.low || c.l) || 0 };
+  return { h: 0, l: 0 };
+}
+
+function waitForRound(value) { const n = Number(value); return Number.isFinite(n) ? Number(n.toPrecision(8)) : 0; }
+
+function waitForFormat(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "0";
+  const a = Math.abs(n);
+  if (a >= 1000) return n.toFixed(0);
+  if (a >= 100) return n.toFixed(1);
+  if (a >= 1) return n.toFixed(3);
+  if (a >= 0.01) return n.toFixed(5);
+  if (a === 0) return "0";
+  return n.toFixed(Math.min(12, Math.max(6, 3 - Math.floor(Math.log10(a)))));
+}
+
+const WAIT_MAX_ATR_DIST = 3;
+
+function waitDedupe(levels, gap) {
+  const out = [];
+  for (let i = 0; i < levels.length; i++) {
+    if (!out.length || Math.abs(levels[i] - out[out.length - 1]) >= gap) out.push(levels[i]);
+  }
+  return out;
+}
+
+function getWaitCandidates(market) {
+  const price = market.currentPrice;
+  if (!validPositive(price)) return null;
+  const candles = (market.recentCandles || []).map(getCandleHL).filter(function(c) { return c.h > 0 && c.l > 0; });
+  if (candles.length < 10) return null;
+  let atr = market.atr;
+  if (!validPositive(atr)) {
+    const last14 = candles.slice(-14);
+    atr = last14.reduce(function(sum, c) { return sum + (c.h - c.l); }, 0) / last14.length;
+  }
+  if (!validPositive(atr)) return null;
+  const K = 2;
+  const pivotHighs = [], pivotLows = [];
+  for (let i = K; i <= candles.length - 2 - K; i++) {
+    let isHigh = true, isLow = true;
+    for (let j = 1; j <= K; j++) {
+      if (candles[i].h <= candles[i - j].h || candles[i].h <= candles[i + j].h) isHigh = false;
+      if (candles[i].l >= candles[i - j].l || candles[i].l >= candles[i + j].l) isLow = false;
+    }
+    if (isHigh) pivotHighs.push(candles[i].h);
+    if (isLow) pivotLows.push(candles[i].l);
+  }
+  const minGap = atr * 0.3;
+  const maxDist = atr * WAIT_MAX_ATR_DIST;
+  const above = pivotHighs.filter(function(h) { return h > price + minGap && h - price <= maxDist; }).sort(function(a, b) { return a - b; });
+  const below = pivotLows.filter(function(l) { return l < price - minGap && price - l <= maxDist; }).sort(function(a, b) { return b - a; });
+  const resistances = waitDedupe(above, minGap).slice(0, 3);
+  const supports = waitDedupe(below, minGap).slice(0, 3);
+  let resCapped = false, supCapped = false;
+  const recent = candles.slice(-21, -1);
+  if (!resistances.length) {
+    resCapped = true;
+    const nearHighs = recent.map(function(c) { return c.h; }).filter(function(h) { return h > price + minGap && h - price <= maxDist; }).sort(function(a, b) { return a - b; });
+    resistances.push(nearHighs.length ? nearHighs[0] : price + atr * 2);
+  }
+  if (!supports.length) {
+    supCapped = true;
+    const nearLows = recent.map(function(c) { return c.l; }).filter(function(l) { return l < price - minGap && price - l <= maxDist; }).sort(function(a, b) { return b - a; });
+    supports.push(nearLows.length ? nearLows[0] : Math.max(price - atr * 2, price * 0.0001));
+  }
+  return { price: price, atr: atr, resistances: resistances, supports: supports, resCapped: resCapped, supCapped: supCapped };
+}
+
+function buildWaitCandidatesText(market) {
+  try {
+    const cand = getWaitCandidates(market);
+    if (!cand) return "";
+    const out = [];
+    cand.resistances.forEach(function(v, i) { out.push("R" + (i + 1) + " = " + waitForFormat(v) + " (" + ((v - cand.price) / cand.atr).toFixed(1) + " ATR upar)"); });
+    cand.supports.forEach(function(v, i) { out.push("S" + (i + 1) + " = " + waitForFormat(v) + " (" + ((cand.price - v) / cand.atr).toFixed(1) + " ATR neeche)"); });
+    return out.join("\n");
+  } catch (e) { return ""; }
+}
+
+function sanitizeWaitForPick(w) {
+  if (!w || typeof w !== "object") return null;
+  const r = /^R[1-3]$/.exec(String(w.resistance || "").trim().toUpperCase());
+  const sp = /^S[1-3]$/.exec(String(w.support || "").trim().toUpperCase());
+  let reason = String(w.reason || "").replace(/[<>]/g, "").replace(/\s+/g, " ").trim();
+  if (reason.length > 300) reason = reason.substring(0, 300);
+  if (!r && !sp && !reason) return null;
+  return { resistance: r ? r[0] : "", support: sp ? sp[0] : "", reason: reason };
+}
+
+function calculateWaitFor(market, direction) {
+  try {
+    const cand = getWaitCandidates(market);
+    if (!cand) return null;
+    const price = cand.price, atr = cand.atr;
+    const resCapped = cand.resCapped, supCapped = cand.supCapped;
+    const MAX_ATR_DIST = WAIT_MAX_ATR_DIST;
+    const pick = market.waitForPick || null;
+    let resIdx = 0, supIdx = 0;
+    if (pick) {
+      const rm = /^R([1-3])$/.exec(pick.resistance || "");
+      const sm = /^S([1-3])$/.exec(pick.support || "");
+      if (rm && cand.resistances[Number(rm[1]) - 1] !== undefined) resIdx = Number(rm[1]) - 1;
+      if (sm && cand.supports[Number(sm[1]) - 1] !== undefined) supIdx = Number(sm[1]) - 1;
+    }
+    const resistance = cand.resistances[resIdx];
+    const support = cand.supports[supIdx];
+    const aiReason = pick && pick.reason ? pick.reason : "";
+    const buffer = atr * 0.15;
+    const longTrigger = resistance + buffer;
+    const shortTrigger = Math.max(support - buffer, 0);
+    let bias = "NEUTRAL";
+    if (validPositive(market.ema20) && validPositive(market.ema50)) {
+      if (price < market.ema50 && market.ema20 < market.ema50) bias = "BEARISH";
+      else if (price > market.ema50 && market.ema20 > market.ema50) bias = "BULLISH";
+    }
+    const rejectionZone = bias === "BEARISH" ? { low: Math.max(resistance - atr * 0.6, 0), high: resistance } : null;
+    const pullbackZone = bias === "BULLISH" ? { low: support, high: support + atr * 0.6 } : null;
+    const VOL_NEEDED = 1.2;
+    const volNow = Number(market.volumeRatio) || 0;
+    const volTxt = " + volume " + VOL_NEEDED + "x ya zyada";
+    const lines = [];
+    const tfLabel = String(market.timeframe || "1h");
+    let longLine = "LONG: " + tfLabel + " candle " + waitForFormat(longTrigger) + " ke upar close ho" + volTxt;
+    if (pullbackZone) longLine += ", ya " + waitForFormat(pullbackZone.low) + "-" + waitForFormat(pullbackZone.high) + " par support hold kare (neeche wick + wapas upar close)";
+    lines.push(longLine);
+    let shortLine = "SHORT: " + tfLabel + " candle " + waitForFormat(shortTrigger) + " ke neeche close ho" + volTxt;
+    if (rejectionZone) shortLine += ", ya " + waitForFormat(rejectionZone.low) + "-" + waitForFormat(rejectionZone.high) + " par rejection aaye (upar wick + wapas neeche close) aur volume barhe";
+    lines.push(shortLine);
+    if (volNow > 0) {
+      if (volNow < 1.0) lines.push("Abhi volume " + volNow.toFixed(2) + "x hai, trade ke liye kam. Pehle volume barhne ka wait karein.");
+      else lines.push("Volume " + volNow.toFixed(2) + "x hai (theek). Ab sirf level ke break ya rejection ka intezar hai.");
+    }
+    if (CONFIG.BREAKOUT_MODE) lines.push("Candle close + volume 1.2x ke saath breakout confirm ho jaye to ADX ki shart nahi lagti — tab dobara Analyze dabayein.");
+    if (aiReason) lines.push("AI ki raye: " + aiReason);
+    if (resCapped || supCapped) lines.push("Note: " + MAX_ATR_DIST + " ATR ke andar asli swing level nahi mila, isliye nazdeeki ATR-based level dikhaya gaya hai.");
+    lines.push("Setup cancel: " + waitForFormat(support) + " ke neeche LONG idea khatam, " + waitForFormat(longTrigger) + " ke upar SHORT idea khatam.");
+    return {
+      bias: bias, resistance: waitForRound(resistance), support: waitForRound(support),
+      longTrigger: waitForRound(longTrigger), shortTrigger: waitForRound(shortTrigger),
+      rejectionZone: rejectionZone ? { low: waitForRound(rejectionZone.low), high: waitForRound(rejectionZone.high) } : null,
+      pullbackZone: pullbackZone ? { low: waitForRound(pullbackZone.low), high: waitForRound(pullbackZone.high) } : null,
+      capped: !!(resCapped || supCapped), aiPicked: !!(pick && (pick.resistance || pick.support)),
+      aiReason: aiReason, volumeNeeded: VOL_NEEDED, volumeNow: waitForRound(volNow), lines: lines
+    };
+  } catch (e) { Logger.log("calculateWaitFor error: " + e.message); return null; }
+}
+
+function normalizeDirection(value) {
+  const d = String(value || "").trim().toUpperCase();
+  if (d === "LONG" || d === "BUY" || d === "BULLISH") return "LONG";
+  if (d === "SHORT" || d === "SELL" || d === "BEARISH") return "SHORT";
+  if (d === "NO_TRADE" || d === "NOTRADE" || d === "NO TRADE") return "NO_TRADE";
+  return null;
+}
+
+function num(value) { const n = Number(value); return Number.isFinite(n) ? n : 0; }
+function numSigned(value) { const n = Number(value); return Number.isFinite(n) ? n : 0; }
+
+function firstFiniteNumber(values) {
+  for (let i = 0; i < values.length; i++) { const n = Number(values[i]); if (Number.isFinite(n)) return n; }
+  return 0;
+}
+
+function getFirstDefinedValue(values) {
+  for (let i = 0; i < values.length; i++) { if (values[i] !== undefined && values[i] !== null && values[i] !== "") return values[i]; }
+  return 0;
+}
+
+function firstValidNumber(values) {
+  for (let i = 0; i < values.length; i++) { const n = Number(values[i]); if (Number.isFinite(n) && n > 0) return n; }
+  return 0;
+}
+
+function validPositive(value) { return (Number.isFinite(Number(value)) && Number(value) > 0); }
+function clamp(value, min, max) { return Math.min(Math.max(value, min), max); }
+
+function roundNumber(value, decimals) {
+  const factor = Math.pow(10, decimals);
+  return Math.round(value * factor) / factor;
+}
+
+function extractHttpStatus(error) {
+  if (error && error.httpStatus) return Number(error.httpStatus);
+  const match = String(error && error.message ? error.message : error).match(/HTTP\s+(\d{3})/i);
+  return match ? Number(match[1]) : 0;
+}
+
+function isRetryableGeminiError(statusCode, message) {
+  if ([429, 500, 502, 503, 504].includes(statusCode)) return true;
+  const text = String(message || "").toLowerCase();
+  return (text.includes("high demand") || text.includes("temporarily unavailable") || text.includes("overloaded") || text.includes("rate limit") || text.includes("resource exhausted"));
+}
+
+function jsonResponse(object) {
+  return ContentService.createTextOutput(JSON.stringify(object)).setMimeType(ContentService.MimeType.JSON);
+}
+
+// ==================== Referral System ====================
+function generateReferralCode(username) {
+  const clean = String(username || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const prefix = clean.substring(0, 4).padEnd(4, "X");
+  let hash = 0;
+  for (let i = 0; i < username.length; i++) { hash = ((hash << 5) - hash) + username.charCodeAt(i); hash = hash & hash; }
+  const suffix = Math.abs(hash).toString(36).toUpperCase().substring(0, 4).padEnd(4, "0");
+  return prefix + suffix;
+}
+
+function findUserByReferralCode(quotaSheet, code) {
+  const lastRow = quotaSheet.getLastRow();
+  if (lastRow < 2) return null;
+  const colMap = getQuotaColumnMap(quotaSheet);
+  if (!colMap.ReferralCode) return null;
+  const maxCol = Math.max(quotaSheet.getLastColumn(), 1);
+  const values = quotaSheet.getRange(2, 1, lastRow - 1, maxCol).getValues();
+  const searchCode = String(code).trim().toUpperCase();
+  for (let i = 0; i < values.length; i++) {
+    const rowCode = String(values[i][colMap.ReferralCode - 1] || "").trim().toUpperCase();
+    if (rowCode === searchCode) {
+      return { row: i + 2, username: String(values[i][0] || "").trim(), referralCount: colMap.ReferralCount ? Number(values[i][colMap.ReferralCount - 1]) || 0 : 0, referralBonus: colMap.ReferralBonus ? Number(values[i][colMap.ReferralBonus - 1]) || 0 : 0 };
+    }
+  }
+  return null;
+}
+
+function processReferralReward(ss, referredUsername) {
+  const refSheet = getOrCreateReferralsSheet(ss);
+  const lastRow = refSheet.getLastRow();
+  if (lastRow < 2) return;
+  const values = refSheet.getRange(2, 1, lastRow - 1, REFERRAL_HEADERS.length).getValues();
+  for (let i = 0; i < values.length; i++) {
+    const row = values[i];
+    const referredUser = String(row[3] || "").trim().toLowerCase();
+    const status = String(row[4] || "").toUpperCase();
+    if (referredUser !== referredUsername.toLowerCase()) continue;
+    if (status === "REWARDED") continue;
+    if (status !== "PENDING") continue;
+    const referrerName = String(row[1] || "").trim();
+    const quotaSheet = getOrCreateQuotaSheet(ss);
+    const referrer = getUserQuotaRow(quotaSheet, referrerName);
+    if (!referrer) { refSheet.getRange(i + 2, 5).setValue("INVALID_REFERRER"); continue; }
+    if ((referrer.referralCount || 0) >= CONFIG.REFERRAL_MAX) { refSheet.getRange(i + 2, 5).setValue("MAX_REACHED"); continue; }
+    const colMap = getQuotaColumnMap(quotaSheet);
+    const newCount = (referrer.referralCount || 0) + 1;
+    const newBonus = (referrer.referralBonus || 0) + CONFIG.REFERRAL_BONUS;
+    const lock = LockService.getScriptLock();
+    lock.waitLock(10000);
+    try {
+      if (colMap.ReferralCount) quotaSheet.getRange(referrer.row, colMap.ReferralCount).setValue(newCount);
+      if (colMap.ReferralBonus) quotaSheet.getRange(referrer.row, colMap.ReferralBonus).setValue(newBonus);
+      if (colMap.Signals_Left) {
+        const current = Number(quotaSheet.getRange(referrer.row, colMap.Signals_Left).getValue()) || 0;
+        quotaSheet.getRange(referrer.row, colMap.Signals_Left).setValue(current + CONFIG.REFERRAL_BONUS);
+      }
+      CacheService.getScriptCache().remove("user_" + referrerName.toLowerCase());
+    } finally { lock.releaseLock(); }
+    refSheet.getRange(i + 2, 5).setValue("REWARDED");
+    refSheet.getRange(i + 2, 6).setValue(CONFIG.REFERRAL_BONUS);
+    Logger.log("✅ Referral reward: " + referrerName + " ko +" + CONFIG.REFERRAL_BONUS + " signals (" + referredUsername + " se)");
+  }
+}
+
+function handleGetReferralInfo(data) {
+  const username = SECURITY.sanitizeString(data.username || data.userId || "", 50).trim();
+  if (!username) return jsonResponse({ error: true, message: "Username darkar hai." });
+  const ss = getSpreadsheet();
+  const quotaSheet = getOrCreateQuotaSheet(ss);
+  const user = getUserQuotaRow(quotaSheet, username);
+  if (!user) return jsonResponse({ error: true, message: "User nahi mila." });
+  const code = user.referralCode || generateReferralCode(username);
+  const refSheet = getOrCreateReferralsSheet(ss);
+  const lastRow = refSheet.getLastRow();
+  const referrals = [];
+  if (lastRow >= 2) {
+    const values = refSheet.getRange(2, 1, lastRow - 1, REFERRAL_HEADERS.length).getValues();
+    for (let i = 0; i < values.length; i++) {
+      if (String(values[i][1] || "").trim().toLowerCase() === username.toLowerCase()) {
+        referrals.push({ referredUser: values[i][3], status: values[i][4], reward: values[i][5], timestamp: values[i][0] });
+      }
+    }
+  }
+  return jsonResponse({
+    error: false, success: true, referralCode: code, referralCount: user.referralCount || 0,
+    referralBonus: user.referralBonus || 0, maxReferrals: CONFIG.REFERRAL_MAX,
+    bonusPerReferral: CONFIG.REFERRAL_BONUS, referrals: referrals
+  });
+}
+
+// ==================== Share Reward System ====================
+function handleShareClaim(data) {
+  const username = SECURITY.sanitizeString(data.username || data.userId || "", 50).trim();
+  const platform = SECURITY.sanitizeString(data.platform || "", 20).trim().toLowerCase();
+  const shareToken = SECURITY.sanitizeString(data.shareToken || "", 64).trim();
+  const deviceId = SECURITY.sanitizeString(data.deviceId || "", 128).trim();
+  if (!username) return jsonResponse({ error: true, message: "Username darkar hai." });
+  if (!platform) return jsonResponse({ error: true, message: "Platform darkar hai." });
+  const allowedPlatforms = ["whatsapp", "twitter", "facebook", "telegram"];
+  if (allowedPlatforms.indexOf(platform) === -1) return jsonResponse({ error: true, message: "Platform valid nahi." });
+  const ss = getSpreadsheet();
+  const quotaSheet = getOrCreateQuotaSheet(ss);
+  const user = getUserQuotaRow(quotaSheet, username);
+  if (!user) return jsonResponse({ error: true, message: "User nahi mila." });
+  const sharesSheet = getOrCreateSharesSheet(ss);
+  const lastRow = sharesSheet.getLastRow();
+  const now = new Date();
+  const nowMs = now.getTime();
+  const oneDayAgo = nowMs - (CONFIG.SHARE_COOLDOWN_HOURS * 60 * 60 * 1000);
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+  let todayCount = 0, monthCount = 0;
+  const platformLastShare = {};
+  if (lastRow >= 2) {
+    const values = sharesSheet.getRange(2, 1, lastRow - 1, SHARE_HEADERS.length).getValues();
+    for (let i = 0; i < values.length; i++) {
+      const rowUser = String(values[i][1] || "").trim().toLowerCase();
+      if (rowUser !== username.toLowerCase()) continue;
+      const ts = values[i][0] instanceof Date ? values[i][0].getTime() : new Date(values[i][0]).getTime();
+      if (isNaN(ts)) continue;
+      const platformRow = String(values[i][2] || "").trim().toLowerCase();
+      if (ts >= monthStart) monthCount++;
+      if (ts >= oneDayAgo) {
+        todayCount++;
+        if (!platformLastShare[platformRow] || ts > platformLastShare[platformRow]) platformLastShare[platformRow] = ts;
+      }
+    }
+  }
+  if (todayCount >= CONFIG.SHARE_MAX_PER_DAY) return jsonResponse({ error: true, message: "Aaj ki share limit khatam ho gayi. Kal dobara koshish karein.", todayCount: todayCount, maxPerDay: CONFIG.SHARE_MAX_PER_DAY });
+  if (monthCount >= CONFIG.SHARE_MAX_PER_MONTH) return jsonResponse({ error: true, message: "Is mahine ki share limit khatam ho gayi.", monthCount: monthCount, maxPerMonth: CONFIG.SHARE_MAX_PER_MONTH });
+  if (platformLastShare[platform]) {
+    const elapsed = nowMs - platformLastShare[platform];
+    if (elapsed < CONFIG.SHARE_COOLDOWN_HOURS * 60 * 60 * 1000) {
+      const hoursLeft = Math.ceil((CONFIG.SHARE_COOLDOWN_HOURS * 60 * 60 * 1000 - elapsed) / (60 * 60 * 1000));
+      return jsonResponse({ error: true, message: "Is platform par dobara share karne ke liye " + hoursLeft + " ghante intezar karein.", hoursLeft: hoursLeft });
+    }
+  }
+  if (shareToken && lastRow >= 2) {
+    const tokens = sharesSheet.getRange(2, 4, lastRow - 1, 1).getValues();
+    for (let i = 0; i < tokens.length; i++) {
+      if (String(tokens[i][0] || "").trim() === shareToken) return jsonResponse({ error: true, message: "Yeh share pehle claim ho chuka hai." });
+    }
+  }
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    sharesSheet.appendRow([now, username, platform, shareToken, CONFIG.SHARE_REWARD, deviceId]);
+    const colMap = getQuotaColumnMap(quotaSheet);
+    if (colMap.Signals_Left) {
+      const current = Number(quotaSheet.getRange(user.row, colMap.Signals_Left).getValue()) || 0;
+      quotaSheet.getRange(user.row, colMap.Signals_Left).setValue(current + CONFIG.SHARE_REWARD);
+    }
+    CacheService.getScriptCache().remove("user_" + username.toLowerCase());
+  } finally { lock.releaseLock(); }
+  return jsonResponse({
+    error: false, success: true, message: "Shukriya! +" + CONFIG.SHARE_REWARD + " signal mil gaya.",
+    reward: CONFIG.SHARE_REWARD, todayCount: todayCount + 1, maxPerDay: CONFIG.SHARE_MAX_PER_DAY, monthCount: monthCount + 1
+  });
+}
+
+// ==================== Suggestions System ====================
+function handleSubmitSuggestion(data) {
+  const username = SECURITY.sanitizeString(data.username || data.userId || "", 50).trim();
+  const category = SECURITY.sanitizeString(data.category || "Other", 30).trim();
+  const suggestion = SECURITY.sanitizeString(data.suggestion || "", CONFIG.SUGGESTION_MAX_LENGTH).trim();
+  if (!username) return jsonResponse({ error: true, message: "Username darkar hai." });
+  if (!suggestion || suggestion.length < 5) return jsonResponse({ error: true, message: "Suggestion kam az kam 5 harf ki honi chahiye." });
+  const ss = getSpreadsheet();
+  const sheet = getOrCreateSuggestionsSheet(ss);
+  sheet.appendRow([new Date(), username, category, suggestion, "NEW", ""]);
+  return jsonResponse({ error: false, success: true, message: "Shukriya! Aapki suggestion mehfooz ho gayi." });
+}
+
+function handleGetMySuggestions(data) {
+  const username = SECURITY.sanitizeString(data.username || data.userId || "", 50).trim();
+  if (!username) return jsonResponse({ error: true, message: "Username darkar hai." });
+  const ss = getSpreadsheet();
+  const sheet = getOrCreateSuggestionsSheet(ss);
+  const lastRow = sheet.getLastRow();
+  const suggestions = [];
+  if (lastRow >= 2) {
+    const values = sheet.getRange(2, 1, lastRow - 1, SUGGESTION_HEADERS.length).getValues();
+    for (let i = 0; i < values.length; i++) {
+      if (String(values[i][1] || "").trim().toLowerCase() === username.toLowerCase()) {
+        suggestions.push({ timestamp: values[i][0], category: values[i][2], suggestion: values[i][3], status: values[i][4], adminReply: values[i][5] });
+      }
+    }
+  }
+  return jsonResponse({ error: false, success: true, suggestions: suggestions });
+}
+
+// ==================== Premium System ====================
+function handleGetPremiumPlans(data) {
+  return jsonResponse({ error: false, success: true, plans: CONFIG.PREMIUM_PLANS });
+}
+
+function handleCheckPremium(data) {
+  const username = SECURITY.sanitizeString(data.username || data.userId || "", 50).trim();
+  if (!username) return jsonResponse({ error: true, message: "Username darkar hai." });
+  const ss = getSpreadsheet();
+  const quotaSheet = getOrCreateQuotaSheet(ss);
+  const user = getUserQuotaRow(quotaSheet, username);
+  if (!user) return jsonResponse({ error: true, message: "User nahi mila." });
+  let premiumActive = false, premiumPlan = "", premiumSignalsPerDay = 0, expiryDate = null;
+  if (user.premiumPlan && user.premiumExpiry) {
+    const expiry = user.premiumExpiry instanceof Date ? user.premiumExpiry : new Date(user.premiumExpiry);
+    if (!isNaN(expiry.getTime()) && expiry > new Date()) {
+      premiumActive = true; premiumPlan = user.premiumPlan; premiumSignalsPerDay = user.premiumSignalsPerDay || 0; expiryDate = expiry;
+    }
+  }
+  return jsonResponse({ error: false, success: true, premiumActive: premiumActive, premiumPlan: premiumPlan, premiumSignalsPerDay: premiumSignalsPerDay, expiryDate: expiryDate });
+}
+
+function handleRedeemPremiumCode(data) {
+  const username = SECURITY.sanitizeString(data.username || data.userId || "", 50).trim();
+  const code = SECURITY.sanitizeString(data.code || "", 30).trim().toUpperCase();
+  if (!username) return jsonResponse({ error: true, message: "Username darkar hai." });
+  if (!code) return jsonResponse({ error: true, message: "Code darkar hai." });
+  const ss = getSpreadsheet();
+  const codesSheet = getOrCreatePremiumCodesSheet(ss);
+  const quotaSheet = getOrCreateQuotaSheet(ss);
+  const lastRow = codesSheet.getLastRow();
+  if (lastRow < 2) return jsonResponse({ error: true, message: "Yeh code valid nahi." });
+  const values = codesSheet.getRange(2, 1, lastRow - 1, PREMIUM_CODE_HEADERS.length).getValues();
+  for (let i = 0; i < values.length; i++) {
+    const rowCode = String(values[i][0] || "").trim().toUpperCase();
+    const rowStatus = String(values[i][4] || "").trim().toUpperCase();
+    if (rowCode !== code) continue;
+    if (rowStatus !== "UNUSED") return jsonResponse({ error: true, message: "Yeh code pehle istemal ho chuka hai." });
+    const planType = String(values[i][1] || "").trim().toUpperCase();
+    const durationDays = Number(values[i][2]) || 0;
+    const signalsPerDay = Number(values[i][3]) || 0;
+    if (!planType || !durationDays) return jsonResponse({ error: true, message: "Code ka data ghalat hai." });
+    const user = getUserQuotaRow(quotaSheet, username);
+    if (!user) return jsonResponse({ error: true, message: "User nahi mila." });
+    const colMap = getQuotaColumnMap(quotaSheet);
+    const now = new Date();
+    const expiry = new Date(now.getTime() + durationDays * 24 * 60 * 60 * 1000);
+    const lock = LockService.getScriptLock();
+    lock.waitLock(10000);
+    try {
+      if (colMap.PremiumPlan) quotaSheet.getRange(user.row, colMap.PremiumPlan).setValue(planType);
+      if (colMap.PremiumExpiry) quotaSheet.getRange(user.row, colMap.PremiumExpiry).setValue(expiry);
+      if (colMap.PremiumSignalsPerDay) quotaSheet.getRange(user.row, colMap.PremiumSignalsPerDay).setValue(signalsPerDay);
+      if (colMap.Signals_Left) {
+        const current = Number(quotaSheet.getRange(user.row, colMap.Signals_Left).getValue()) || 0;
+        const newQuota = Math.max(current, signalsPerDay + (user.referralBonus || 0));
+        quotaSheet.getRange(user.row, colMap.Signals_Left).setValue(newQuota);
+      }
+      codesSheet.getRange(i + 2, 5).setValue("USED");
+      codesSheet.getRange(i + 2, 6).setValue(username);
+      codesSheet.getRange(i + 2, 7).setValue(now);
+      CacheService.getScriptCache().remove("user_" + username.toLowerCase());
+    } finally { lock.releaseLock(); }
+    return jsonResponse({
+      error: false, success: true, message: "Mubarak ho! " + planType + " plan " + durationDays + " din ke liye activate ho gaya.",
+      planType: planType, durationDays: durationDays, signalsPerDay: signalsPerDay, expiryDate: expiry
+    });
+  }
+  return jsonResponse({ error: true, message: "Yeh code valid nahi." });
+}
+
+function handleAdminActivatePremium(data) {
+  const adminKey = String(data.adminKey || "").trim();
+  const expectedKey = PropertiesService.getScriptProperties().getProperty("ADMIN_KEY");
+  if (!expectedKey || adminKey !== expectedKey) return jsonResponse({ error: true, message: "Ghair mujaz darkhwast." });
+  const username = SECURITY.sanitizeString(data.username || "", 50).trim();
+  const planType = SECURITY.sanitizeString(data.planType || "", 20).trim().toUpperCase();
+  const durationDays = Number(data.durationDays) || 30;
+  const paymentRef = SECURITY.sanitizeString(data.paymentRef || "", 100).trim();
+  if (!username) return jsonResponse({ error: true, message: "Username darkar hai." });
+  if (!CONFIG.PREMIUM_PLANS[planType]) return jsonResponse({ error: true, message: "Plan type valid nahi. BASIC, PRO ya ELITE use karein." });
+  const ss = getSpreadsheet();
+  const quotaSheet = getOrCreateQuotaSheet(ss);
+  const user = getUserQuotaRow(quotaSheet, username);
+  if (!user) return jsonResponse({ error: true, message: "User nahi mila." });
+  const signalsPerDay = CONFIG.PREMIUM_PLANS[planType].signalsPerDay;
+  const colMap = getQuotaColumnMap(quotaSheet);
+  const now = new Date();
+  const expiry = new Date(now.getTime() + durationDays * 24 * 60 * 60 * 1000);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    if (colMap.PremiumPlan) quotaSheet.getRange(user.row, colMap.PremiumPlan).setValue(planType);
+    if (colMap.PremiumExpiry) quotaSheet.getRange(user.row, colMap.PremiumExpiry).setValue(expiry);
+    if (colMap.PremiumSignalsPerDay) quotaSheet.getRange(user.row, colMap.PremiumSignalsPerDay).setValue(signalsPerDay);
+    if (colMap.Signals_Left) {
+      const current = Number(quotaSheet.getRange(user.row, colMap.Signals_Left).getValue()) || 0;
+      const newQuota = Math.max(current, signalsPerDay + (user.referralBonus || 0));
+      quotaSheet.getRange(user.row, colMap.Signals_Left).setValue(newQuota);
+    }
+    const premiumSheet = getOrCreatePremiumSheet(ss);
+    premiumSheet.appendRow([username, planType, signalsPerDay, now, expiry, "ACTIVE", paymentRef, "ADMIN", ""]);
+    CacheService.getScriptCache().remove("user_" + username.toLowerCase());
+  } finally { lock.releaseLock(); }
+  return jsonResponse({
+    error: false, success: true, message: username + " ko " + planType + " plan " + durationDays + " din ke liye activate kar diya gaya.",
+    planType: planType, durationDays: durationDays, signalsPerDay: signalsPerDay, expiryDate: expiry
+  });
+}
+
+function handleAdminCreatePremiumCodes(data) {
+  const adminKey = String(data.adminKey || "").trim();
+  const expectedKey = PropertiesService.getScriptProperties().getProperty("ADMIN_KEY");
+  if (!expectedKey || adminKey !== expectedKey) return jsonResponse({ error: true, message: "Ghair mujaz darkhwast." });
+  const planType = SECURITY.sanitizeString(data.planType || "", 20).trim().toUpperCase();
+  const durationDays = Number(data.durationDays) || 30;
+  const count = Math.min(Number(data.count) || 1, 100);
+  if (!CONFIG.PREMIUM_PLANS[planType]) return jsonResponse({ error: true, message: "Plan type valid nahi." });
+  const signalsPerDay = CONFIG.PREMIUM_PLANS[planType].signalsPerDay;
+  const ss = getSpreadsheet();
+  const codesSheet = getOrCreatePremiumCodesSheet(ss);
+  const generatedCodes = [];
+  const now = new Date();
+  for (let i = 0; i < count; i++) {
+    let code, attempts = 0;
+    do {
+      const randomPart = Utilities.getUuid().substring(0, 8).toUpperCase().replace(/-/g, "");
+      code = planType.substring(0, 3) + "-" + randomPart;
+      attempts++;
+    } while (attempts < 5 && codeExistsInSheet(codesSheet, code));
+    codesSheet.appendRow([code, planType, durationDays, signalsPerDay, "UNUSED", "", "", now]);
+    generatedCodes.push(code);
+  }
+  return jsonResponse({
+    error: false, success: true, message: count + " codes banaye gaye.", codes: generatedCodes,
+    planType: planType, durationDays: durationDays, signalsPerDay: signalsPerDay
+  });
+}
+
+function codeExistsInSheet(sheet, code) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return false;
+  const values = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+  for (let i = 0; i < values.length; i++) { if (String(values[i][0] || "").trim().toUpperCase() === code.toUpperCase()) return true; }
+  return false;
+}
+
+// ==================== Indicator Calculations ====================
+function calculateRSI(closes, period) {
+  period = period || 14;
+  if (!closes || closes.length < period + 1) return 50;
+  let gains = 0, losses = 0;
+  for (let i = 1; i <= period; i++) {
+    const change = closes[i] - closes[i - 1];
+    if (change > 0) gains += change; else losses -= change;
+  }
+  let avgGain = gains / period, avgLoss = losses / period;
+  for (let i = period + 1; i < closes.length; i++) {
+    const change = closes[i] - closes[i - 1];
+    const currentGain = change > 0 ? change : 0;
+    const currentLoss = change < 0 ? -change : 0;
+    avgGain = ((avgGain * (period - 1)) + currentGain) / period;
+    avgLoss = ((avgLoss * (period - 1)) + currentLoss) / period;
+  }
+  if (avgLoss === 0) return 100;
+  if (avgGain === 0) return 0;
+  const rs = avgGain / avgLoss;
+  return 100 - (100 / (1 + rs));
+}
+
+function calculateEMA(data, period) {
+  if (!data || data.length === 0) return [0];
+  const k = 2 / (period + 1);
+  const emaArray = [data[0]];
+  for (let i = 1; i < data.length; i++) emaArray.push(data[i] * k + emaArray[i - 1] * (1 - k));
+  return emaArray;
+}
+
+function calculateMACD(closes) {
+  if (!closes || closes.length < 35) return { macd: 0, signal: 0 };
+  const ema12 = calculateEMA(closes, 12);
+  const ema26 = calculateEMA(closes, 26);
+  const macdLine = ema12.map(function(v, i) { return v - ema26[i]; });
+  const signalSource = macdLine.slice(26);
+  const signalLine = calculateEMA(signalSource, 9);
+  return { macd: macdLine[macdLine.length - 1], signal: signalLine[signalLine.length - 1] };
+}
+
+function calculateATRAndADX(highs, lows, closes, period) {
+  period = period || 14;
+  if (!closes || closes.length < period * 2) return { atr: 0, adx: 25 };
+  const tr = [], plusDM = [], minusDM = [];
+  for (let i = 1; i < closes.length; i++) {
+    const h = highs[i], l = lows[i], pc = closes[i - 1];
+    tr.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)));
+    const upMove = h - highs[i - 1], downMove = lows[i - 1] - l;
+    plusDM.push(upMove > downMove && upMove > 0 ? upMove : 0);
+    minusDM.push(downMove > upMove && downMove > 0 ? downMove : 0);
+  }
+  function smooth(arr) {
+    if (arr.length < period) return [];
+    const result = [arr.slice(0, period).reduce(function(a, b) { return a + b; }, 0)];
+    for (let i = period; i < arr.length; i++) result.push(result[result.length - 1] - (result[result.length - 1] / period) + arr[i]);
+    return result;
+  }
+  const smoothedTR = smooth(tr), smoothedPlus = smooth(plusDM), smoothedMinus = smooth(minusDM);
+  if (!smoothedTR.length) return { atr: 0, adx: 25 };
+  const dx = [];
+  for (let i = 0; i < smoothedTR.length; i++) {
+    const diPlus = (smoothedPlus[i] / smoothedTR[i]) * 100 || 0;
+    const diMinus = (smoothedMinus[i] / smoothedTR[i]) * 100 || 0;
+    const sum = diPlus + diMinus;
+    dx.push(sum > 0 ? (Math.abs(diPlus - diMinus) / sum) * 100 : 0);
+  }
+  const adxSmooth = smooth(dx);
+  const adx = adxSmooth.length ? adxSmooth[adxSmooth.length - 1] / period : 25;
+  const atr = smoothedTR[smoothedTR.length - 1] / period;
+  return { atr: atr, adx: adx };
+}
+
+// ==================== Admin: Bulk Generate ====================
+function handleAdminBulkGenerate(data) {
+  const adminKey = String(data.adminKey || "").trim();
+  const expectedKey = PropertiesService.getScriptProperties().getProperty("ADMIN_KEY");
+  if (!expectedKey || adminKey !== expectedKey) return jsonResponse({ error: true, message: "Ghair mujaz darkhwast." });
+  const codesSheet = getOrCreatePremiumCodesSheet(getSpreadsheet());
+  const now = new Date();
+  const result = { BASIC: [], PRO: [], ELITE: [] };
+  const plans = [{ name: "BASIC", days: 30 }, { name: "PRO", days: 30 }, { name: "ELITE", days: 30 }];
+  plans.forEach(function(p) {
+    const signalsPerDay = CONFIG.PREMIUM_PLANS[p.name].signalsPerDay;
+    for (let i = 0; i < 20; i++) {
+      const code = generateUniquePremiumCode(codesSheet, p.name);
+      codesSheet.appendRow([code, p.name, p.days, signalsPerDay, "UNUSED", "", "", now]);
+      result[p.name].push(code);
+    }
+  });
+  return jsonResponse({ error: false, success: true, message: "60 codes banaye gaye (20 × 3 plans).", codes: result });
+}
+
+function handleAdminGenerateSingle(data) {
+  const adminKey = String(data.adminKey || "").trim();
+  const expectedKey = PropertiesService.getScriptProperties().getProperty("ADMIN_KEY");
+  if (!expectedKey || adminKey !== expectedKey) return jsonResponse({ error: true, message: "Ghair mujaz darkhwast." });
+  const planType = SECURITY.sanitizeString(data.planType || "", 20).trim().toUpperCase();
+  const durationDays = Number(data.durationDays) || 30;
+  if (!CONFIG.PREMIUM_PLANS[planType]) return jsonResponse({ error: true, message: "Plan valid nahi. BASIC / PRO / ELITE." });
+  const signalsPerDay = CONFIG.PREMIUM_PLANS[planType].signalsPerDay;
+  const codesSheet = getOrCreatePremiumCodesSheet(getSpreadsheet());
+  const code = generateUniquePremiumCode(codesSheet, planType);
+  codesSheet.appendRow([code, planType, durationDays, signalsPerDay, "UNUSED", "", "", new Date()]);
+  return jsonResponse({
+    error: false, success: true, message: planType + " ka code ban gaya.",
+    code: code, planType: planType, durationDays: durationDays, signalsPerDay: signalsPerDay
+  });
+}
+
+function handleAdminListCodes(data) {
+  const adminKey = String(data.adminKey || "").trim();
+  const expectedKey = PropertiesService.getScriptProperties().getProperty("ADMIN_KEY");
+  if (!expectedKey || adminKey !== expectedKey) return jsonResponse({ error: true, message: "Ghair mujaz darkhwast." });
+  const codesSheet = getOrCreatePremiumCodesSheet(getSpreadsheet());
+  const lastRow = codesSheet.getLastRow();
+  if (lastRow < 2) return jsonResponse({ error: false, success: true, codes: [], stats: { unused: 0, used: 0, total: 0 } });
+  const values = codesSheet.getRange(2, 1, lastRow - 1, 8).getValues();
+  const codes = [];
+  let unused = 0, used = 0;
+  for (let i = values.length - 1; i >= 0; i--) {
+    const row = values[i];
+    const status = String(row[4] || "").trim().toUpperCase();
+    if (status === "UNUSED") unused++;
+    if (status === "USED") used++;
+    codes.push({
+      code: row[0], planType: row[1], durationDays: row[2], signalsPerDay: row[3], status: status,
+      usedBy: row[5], usedAt: row[6] instanceof Date ? row[6].toISOString() : String(row[6] || ""),
+      createdAt: row[7] instanceof Date ? row[7].toISOString() : String(row[7] || "")
+    });
+  }
+  return jsonResponse({ error: false, success: true, codes: codes, stats: { unused: unused, used: used, total: codes.length } });
+}
+
+function generateUniquePremiumCode(codesSheet, planType) {
+  const prefix = planType.substring(0, 3);
+  let attempts = 0, code;
+  while (attempts < 10) {
+    const random = Utilities.getUuid().substring(0, 8).toUpperCase().replace(/-/g, "");
+    code = prefix + "-" + random;
+    if (!codeExistsInSheet(codesSheet, code)) return code;
+    attempts++;
+  }
+  return prefix + "-" + Date.now().toString(36).toUpperCase().substring(0, 8);
+}
+
+// ==================== Watch Ad Reward ====================
+function handleWatchAdReward(data) {
+  const username = SECURITY.sanitizeString(data.username || data.userId || "", 50).trim();
+  const deviceId = SECURITY.sanitizeString(data.deviceId || "", 128).trim();
+  if (!username) return jsonResponse({ error: true, message: "Username darkar hai." });
+  const ss = getSpreadsheet();
+  const quotaSheet = getOrCreateQuotaSheet(ss);
+  const user = getUserQuotaRow(quotaSheet, username);
+  if (!user || user.row < 2) return jsonResponse({ error: true, message: "User account nahi mila." });
+  const adsSheet = getOrCreateSheet(ss, "WatchAds", ["Timestamp", "Username", "DeviceId", "RewardGiven"]);
+  const lastRow = adsSheet.getLastRow();
+  const today = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, "yyyy-MM-dd");
+  let adsToday = 0;
+  if (lastRow >= 2) {
+    const rows = adsSheet.getRange(2, 1, lastRow - 1, 2).getValues();
+    for (let i = 0; i < rows.length; i++) {
+      if (String(rows[i][1]).toLowerCase() === username.toLowerCase()) {
+        const rowDate = normalizeSheetDate(rows[i][0]);
+        if (rowDate === today) adsToday++;
+      }
+    }
+  }
+  if (adsToday >= 5) return jsonResponse({ error: true, message: "Aap aaj ki watch ad limit (5) mukammal kar chuke hain. Kal dobara aayen." });
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const current = Number(quotaSheet.getRange(user.row, 3).getValue()) || 0;
+    const newQuota = current + 1;
+    quotaSheet.getRange(user.row, 3).setValue(newQuota);
+    adsSheet.appendRow([new Date(), username, deviceId, 1]);
+    CacheService.getScriptCache().remove("user_" + username.toLowerCase());
+    return jsonResponse({ error: false, success: true, message: "Mubarak! +1 Signal mil gaya.", signalsLeft: newQuota });
+  } finally { lock.releaseLock(); }
+}
+
+// ==================== Auto-Sync User Plan (FINAL - 30 days + Math.max) ====================
+function handleSyncUserPlan(data) {
+  const username = SECURITY.sanitizeString(data.username || data.userId || "", 50).trim();
+  const plan = SECURITY.sanitizeString(data.plan || "", 20).trim().toUpperCase();
+  if (!username) return jsonResponse({ error: true, message: "Username darkar hai." });
+  if (!plan) return jsonResponse({ error: true, message: "Plan darkar hai." });
+  const ss = getSpreadsheet();
+  const quotaSheet = getOrCreateQuotaSheet(ss);
+  const user = getUserQuotaRow(quotaSheet, username);
+  if (!user || user.row < 2) return jsonResponse({ error: true, message: "User nahi mila." });
+  let signalsPerDay = 1;
+  if (plan === "ELITE") signalsPerDay = 20;
+  else if (plan === "PRO") signalsPerDay = 10;
+  else if (plan === "BASIC") signalsPerDay = 5;
+  const colMap = getQuotaColumnMap(quotaSheet);
+  const now = new Date();
+  const expiry = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    if (colMap.PremiumPlan) quotaSheet.getRange(user.row, colMap.PremiumPlan).setValue(plan);
+    if (colMap.PremiumExpiry) quotaSheet.getRange(user.row, colMap.PremiumExpiry).setValue(expiry);
+    if (colMap.PremiumSignalsPerDay) quotaSheet.getRange(user.row, colMap.PremiumSignalsPerDay).setValue(signalsPerDay);
+    const current = Number(quotaSheet.getRange(user.row, 3).getValue()) || 0;
+    const newSignals = Math.max(current, signalsPerDay + (user.referralBonus || 0));
+    quotaSheet.getRange(user.row, 3).setValue(newSignals);
+    quotaSheet.getRange(user.row, 4).setValue(now);
+    CacheService.getScriptCache().remove("user_" + username.toLowerCase());
+    return jsonResponse({
+      error: false, success: true,
+      message: username + " ka plan " + plan + " (" + signalsPerDay + " signals/day) Google Sheet mein auto-update ho gaya!",
+      username: username, plan: plan, signalsLeft: newSignals, quotaLimit: signalsPerDay
+    });
+  } finally { lock.releaseLock(); }
+}
+
+// ==================== Test Functions ====================
+function testBackend() {
+  Logger.log("=== Backend Test ===");
+  const geminiKey = getGeminiApiKey();
+  Logger.log("Gemini API Key: " + (geminiKey ? "OK (length " + geminiKey.length + ")" : "MISSING"));
+  const groqKey = getGroqApiKey();
+  Logger.log("Groq API Key: " + (groqKey ? "OK (length " + groqKey.length + ")" : "MISSING"));
+  try {
+    const ss = getSpreadsheet();
+    Logger.log("Spreadsheet: OK (" + ss.getName() + ")");
+    const sheets = ss.getSheets().map(function(s) { return s.getName(); });
+    Logger.log("Sheets: " + sheets.join(", "));
+  } catch (e) { Logger.log("Spreadsheet Error: " + e.message); }
+  const salt = PropertiesService.getScriptProperties().getProperty("PASSWORD_SALT");
+  Logger.log("Password Salt: " + (salt ? "OK" : "Auto-generate hoga"));
+  const adminKey = PropertiesService.getScriptProperties().getProperty("ADMIN_KEY");
+  Logger.log("Admin Key: " + (adminKey ? "OK" : "Not set (optional)"));
+  Logger.log("=== Test Complete ===");
+}
+
+function testSheetConnection() {
+  try {
+    const ss = getSpreadsheet();
+    Logger.log("✅ Connected successfully! Sheet: " + ss.getName());
+    const sheets = ss.getSheets();
+    sheets.forEach(function(sheet) {
+      Logger.log("• " + sheet.getName() + " — " + sheet.getLastRow() + " rows, " + sheet.getLastColumn() + " cols");
+    });
+  } catch (e) { Logger.log("❌ Error: " + e.message); }
+}
+
+function testGroqIntegration() {
+  Logger.log("=== GROQ INTEGRATION TEST ===");
+  const groqApiKey = getGroqApiKey();
+  if (!groqApiKey) { Logger.log("❌ GROQ_API_KEY set nahi hai"); return; }
+  const testPrompt = "Say 'Groq is working' in exactly 3 words. Reply with JSON: {\"direction\":\"LONG\",\"confidence\":75,\"reasoning\":\"test\"}";
+  try {
+    const response = callGroq(groqApiKey, "openai/gpt-oss-120b", testPrompt);
+    const text = extractGroqText(response);
+    Logger.log("✅ Groq response: " + text);
+  } catch (e) { Logger.log("❌ Groq test fail: " + e.message); }
+}
+
+function listAllGeminiModels() {
+  const key = PropertiesService.getScriptProperties().getProperty("GEMINI_API_KEY");
+  if (!key) { Logger.log("GEMINI_API_KEY set nahi hai"); return; }
+  const url = "https://generativelanguage.googleapis.com/v1beta/models?key=" + key;
+  const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+  const code = res.getResponseCode();
+  if (code !== 200) { Logger.log("Error: " + res.getContentText()); return; }
+  const json = JSON.parse(res.getContentText());
+  if (json.models) {
+    json.models.forEach(function(m) {
+      if (m.supportedGenerationMethods && m.supportedGenerationMethods.indexOf("generateContent") !== -1) Logger.log("• " + m.name.replace("models/", ""));
+    });
+  }
+}
+/**
+ * Run this function once in Apps Script to automatically add columns 33-39
+ * and safely backfill TP1, TP2, TP3 for all past signals without losing any data.
+ */
+function upgradeJournalColumns() {
+  const ss = getSpreadsheet();
+  const sheet = getOrCreateJournalSheet(ss);
+  const lastRow = sheet.getLastRow();
+  const lastCol = sheet.getLastColumn();
+  
+  const NEW_HEADERS = ["TP1", "TP2", "TP3", "TP1_Hit", "TP2_Hit", "TP3_Hit", "TargetHit"];
+  
+  // 1. Add headers if missing
+  if (lastCol < 39) {
+    sheet.getRange(1, 33, 1, NEW_HEADERS.length).setValues([NEW_HEADERS]);
+    Logger.log("New headers added to row 1 (columns 33 to 39).");
+  }
+  
+  if (lastRow < 2) return { success: true, message: "No rows to backfill." };
+  
+  // 2. Read existing rows
+  const numRows = lastRow - 1;
+  const existingData = sheet.getRange(2, 1, numRows, 32).getValues();
+  const newColsData = [];
+  
+  for (let i = 0; i < existingData.length; i++) {
+    const row = existingData[i];
+    const dir = String(row[COL.DIRECTION - 1] || "").toUpperCase();
+    const entry = Number(row[COL.ENTRY - 1]) || 0;
+    const tp = Number(row[COL.TAKEPROFIT - 1]) || 0;
+    const outcome = String(row[COL.OUTCOME - 1] || "").toUpperCase();
+    
+    let tp1 = 0, tp2 = tp, tp3 = 0;
+    let tp1Hit = "NO", tp2Hit = "NO", tp3Hit = "NO", targetHit = "OPEN";
+    
+    if (entry > 0 && tp > 0) {
+      const fullReward = Math.abs(tp - entry);
+      tp1 = dir === "LONG" ? (entry + fullReward * 0.5) : (entry - fullReward * 0.5);
+      tp2 = tp;
+      tp3 = dir === "LONG" ? (entry + fullReward * 1.5) : (entry - fullReward * 1.5);
+    }
+    
+    if (outcome === "WIN") {
+      tp1Hit = "YES";
+      tp2Hit = "YES";
+      targetHit = "TP2";
+    } else if (outcome === "LOSS") {
+      targetHit = "SL";
+    } else if (outcome === "EXPIRED") {
+      targetHit = "EXPIRED";
+    }
+    
+    newColsData.push([tp1, tp2, tp3, tp1Hit, tp2Hit, tp3Hit, targetHit]);
+  }
+  
+  sheet.getRange(2, 33, numRows, NEW_HEADERS.length).setValues(newColsData);
+  Logger.log("Upgraded " + numRows + " journal rows with TP1/TP2/TP3 data.");
+  return { success: true, upgradedRows: numRows };
+}
+// ==================== Admin Users List & Reset (Google Sheets Quota Tab) ====================
+function handleAdminListUsers(data) {
+  const adminKey = String(data.adminKey || "").trim();
+  const expectedKey = PropertiesService.getScriptProperties().getProperty("ADMIN_KEY") || "Admin@zulqarnain.1";
+  if (!adminKey || adminKey !== expectedKey) {
+    return jsonResponse({ error: true, message: "Ghair mujaz darkhwast (Invalid Admin Key)." });
+  }
+
+  try {
+    const ss = getSpreadsheet();
+    const sheet = getOrCreateQuotaSheet(ss);
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) return jsonResponse({ error: false, success: true, users: [] });
+
+    const totalCols = Math.max(sheet.getLastColumn(), 10);
+    const values = sheet.getRange(2, 1, lastRow - 1, totalCols).getValues();
+    const users = [];
+
+    for (let i = 0; i < values.length; i++) {
+      const row = values[i];
+      const username = String(row[0] || "").trim();
+      if (!username) continue;
+
+      users.push({
+        username: username,
+        plan: String(row[7] || "FREE").toUpperCase(),
+        dailyQuotaLeft: Number(row[2]) || 0,
+        lastUsedTime: row[3] ? new Date(row[3]).toISOString() : "",
+        referralCode: String(row[4] || ""),
+        referralsCount: Number(row[5]) || 0,
+        referralBonus: Number(row[6]) || 0,
+        hasPassword: Boolean(row[1])
+      });
+    }
+
+    return jsonResponse({ error: false, success: true, users: users });
+  } catch (e) {
+    return jsonResponse({ error: true, message: "Users list fetch error: " + e.message });
+  }
+}
+
+function handleAdminResetPassword(data) {
+  const adminKey = String(data.adminKey || "").trim();
+  const expectedKey = PropertiesService.getScriptProperties().getProperty("ADMIN_KEY") || "Admin@zulqarnain.1";
+  if (!adminKey || adminKey !== expectedKey) {
+    return jsonResponse({ error: true, message: "Ghair mujaz darkhwast (Invalid Admin Key)." });
+  }
+
+  const username = SECURITY.sanitizeString(data.username || "", 50).trim();
+  const newPassword = String(data.newPassword || "").trim();
+  if (!username || newPassword.length < 6) {
+    return jsonResponse({ error: true, message: "Username aur kam az kam 6 harf ka password darkar hai." });
+  }
+
+  try {
+    const ss = getSpreadsheet();
+    const sheet = getOrCreateQuotaSheet(ss);
+    const userRow = getUserQuotaRow(sheet, username);
+    if (!userRow) return jsonResponse({ error: true, message: "User nahi mila." });
+
+    const newHash = SECURITY.hashPassword(newPassword);
+    sheet.getRange(userRow.row, 2).setValue(newHash);
+    updateUserCache(username, newHash, userRow.signalsLeft, new Date());
+    return jsonResponse({ error: false, success: true, message: "Password kamyabi se reset ho gaya." });
+  } catch (e) {
+    return jsonResponse({ error: true, message: "Password reset error: " + e.message });
+  }
+}

@@ -1,0 +1,96 @@
+name: Build Android APK
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    name: Build Signed Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 1. Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 2. Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: 3. Set up Java JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: 4. Set up Android SDK & accept licenses
+        run: |
+          echo "Accepting Android SDK licenses..."
+          yes | sdkmanager --licenses || true
+
+      - name: 5. Install NPM Dependencies
+        run: |
+          npm install
+          npm install --save-dev @capacitor/core @capacitor/cli @capacitor/android
+
+      - name: 6. Build Web Production Bundle (Vite)
+        run: |
+          npm run build
+
+      - name: 7. Initialize Capacitor Android Platform
+        run: |
+          if [ ! -d "android" ]; then
+            echo "Android folder not found. Adding android platform via Capacitor..."
+            npx cap add android
+          fi
+          echo "Syncing web assets to Capacitor Android project..."
+          npx cap sync android
+
+      - name: 8. Setup Release Keystore from Secrets
+        run: |
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "Decoding permanent release keystore from secrets..."
+            echo "$ANDROID_KEYSTORE_BASE64" | tr -d '\r\n ' | base64 -d > android/app/release.keystore
+            echo "Keystore successfully written to android/app/release.keystore"
+            ls -la android/app/release.keystore
+          else
+            echo "Warning: ANDROID_KEYSTORE_BASE64 secret is not set. Will fallback to debug build if keystore is missing."
+          fi
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+
+      - name: 9. Build APK with Gradle (Release with Fallback)
+        run: |
+          cd android
+          chmod +x gradlew
+          if [ -f "app/release.keystore" ] && [ -n "$ANDROID_KEYSTORE_PASSWORD" ]; then
+            echo "Building signed Release APK using permanent keystore..."
+            ./gradlew assembleRelease --stacktrace
+          else
+            echo "Building Debug APK..."
+            ./gradlew assembleDebug --stacktrace
+          fi
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+      - name: 10. Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CryptoWorld-Release-APK
+          path: |
+            android/app/build/outputs/apk/release/*.apk
+            android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
