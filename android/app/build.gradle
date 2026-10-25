@@ -1,14 +1,14 @@
 apply plugin: 'com.android.application'
 
 android {
-    namespace = "com.cryptoworld.app"
+    namespace = "vip.cryptoworld.app"
     compileSdk = rootProject.ext.compileSdkVersion
     defaultConfig {
-        applicationId "com.cryptoworld.app"
+        applicationId "vip.cryptoworld.app"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        versionCode 2
+        versionName "1.0.1"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -16,8 +16,32 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        release {
+            def keystoreFile = file("release.keystore")
+            def keystoreBase64 = System.getenv("ANDROID_KEYSTORE_BASE64")
+            if (keystoreBase64 != null && !keystoreBase64.trim().isEmpty() && !keystoreFile.exists()) {
+                try {
+                    keystoreFile.bytes = keystoreBase64.decodeBase64()
+                } catch (Exception e) {
+                    println("Keystore Base64 decode notice: " + e.message)
+                }
+            }
+            if (System.getenv("ANDROID_KEYSTORE_FILE") != null) {
+                def customFile = file(System.getenv("ANDROID_KEYSTORE_FILE"))
+                if (customFile.exists()) {
+                    keystoreFile = customFile
+                }
+            }
+            storeFile keystoreFile
+            storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD") ?: ""
+            keyAlias System.getenv("ANDROID_KEY_ALIAS") ?: ""
+            keyPassword System.getenv("ANDROID_KEY_PASSWORD") ?: ""
+        }
+    }
     buildTypes {
         release {
+            signingConfig signingConfigs.release
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }

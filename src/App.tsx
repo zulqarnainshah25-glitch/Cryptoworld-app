@@ -40,7 +40,7 @@ import {
 // -------------------------------------------------------------
 // CONFIGURATION & CONSTANTS
 // -------------------------------------------------------------
-const CURRENT_APP_VERSION = '1.0.0';
+const CURRENT_APP_VERSION = '1.0.1';
 
 const BACKEND_CONFIG = {
   gasUrl: 'https://script.google.com/macros/s/AKfycbzxKNv2JGtgAbLohzkvTwN5it7Xl3iKSKb6RK228k7JQxUnl-OPPKaXrjq5v-eaj9XrPQ/exec'
@@ -4495,6 +4495,7 @@ export default function App() {
           </div>
         </div>
       )}
-      </>
+
+    </>
   );
 }

@@ -13,7 +13,7 @@ on:
 
 jobs:
   build-apk:
-    name: Build Capacitor Android Debug APK
+    name: Build Signed Android APK
     runs-on: ubuntu-latest
 
     steps:
@@ -30,7 +30,7 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '21'
+          java-version: '17'
 
       - name: 4. Set up Android SDK & accept licenses
         run: |
@@ -39,8 +39,8 @@ jobs:
 
       - name: 5. Install NPM Dependencies
         run: |
-          npm install --legacy-peer-deps
-          npm install --save-dev @capacitor/core @capacitor/cli @capacitor/android --legacy-peer-dep
+          npm install
+          npm install --save-dev @capacitor/core @capacitor/cli @capacitor/android
 
       - name: 6. Build Web Production Bundle (Vite)
         run: |
@@ -55,16 +55,41 @@ jobs:
           echo "Syncing web assets to Capacitor Android project..."
           npx cap sync android
 
-      - name: 8. Build Debug APK with Gradle
+      - name: 8. Setup Release Keystore from Secrets
+        run: |
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "Decoding permanent release keystore from secrets..."
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/app/release.keystore
+            echo "Keystore successfully written to android/app/release.keystore"
+          else
+            echo "Warning: ANDROID_KEYSTORE_BASE64 secret is not set. Will fallback to debug build if keystore is missing."
+          fi
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+
+      - name: 9. Build APK with Gradle (Release with Fallback)
         run: |
           cd android
           chmod +x gradlew
-          ./gradlew assembleDebug --stacktrace
+          if [ -f "app/release.keystore" ] && [ -n "$ANDROID_KEYSTORE_PASSWORD" ]; then
+            echo "Building signed Release APK using permanent keystore..."
+            ./gradlew assembleRelease --stacktrace
+          else
+            echo "Building Debug APK..."
+            ./gradlew assembleDebug --stacktrace
+          fi
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
 
-      - name: 9. Upload Debug APK Artifact
+      - name: 10. Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CryptoWorld-Debug-APK
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          name: CryptoWorld-Release-APK
+          path: |
+            android/app/build/outputs/apk/release/*.apk
+            android/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 14
