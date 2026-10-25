@@ -30,7 +30,7 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '17'
+          java-version: '21'
 
       - name: 4. Set up Android SDK & accept licenses
         run: |
@@ -39,8 +39,8 @@ jobs:
 
       - name: 5. Install NPM Dependencies
         run: |
-          npm install
-          npm install --save-dev @capacitor/core @capacitor/cli @capacitor/android
+          npm install --legacy-peer-deps
+          npm install --save-dev @capacitor/core @capacitor/cli @capacitor/android --legacy-peer-dep
 
       - name: 6. Build Web Production Bundle (Vite)
         run: |
@@ -59,9 +59,8 @@ jobs:
         run: |
           if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
             echo "Decoding permanent release keystore from secrets..."
-            echo "$ANDROID_KEYSTORE_BASE64" | tr -d '\r\n ' | base64 -d > android/app/release.keystore
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/app/release.keystore
             echo "Keystore successfully written to android/app/release.keystore"
-            ls -la android/app/release.keystore
           else
             echo "Warning: ANDROID_KEYSTORE_BASE64 secret is not set. Will fallback to debug build if keystore is missing."
           fi
