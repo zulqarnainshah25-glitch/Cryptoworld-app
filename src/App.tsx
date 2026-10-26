@@ -36,11 +36,32 @@ import {
   Search,
   Trash2
 } from 'lucide-react';
+import { AdMob } from '@capacitor-community/admob';
+import { Capacitor } from '@capacitor/core';
 
 // -------------------------------------------------------------
 // CONFIGURATION & CONSTANTS
 // -------------------------------------------------------------
-const CURRENT_APP_VERSION = '1.0.1';
+const CURRENT_APP_VERSION = '1.0.2';
+
+const compareVersions = (v1: string, v2: string): number => {
+  const p1 = (v1 || '').replace(/[^0-9.]/g, '').split('.').map(n => parseInt(n, 10) || 0);
+  const p2 = (v2 || '').replace(/[^0-9.]/g, '').split('.').map(n => parseInt(n, 10) || 0);
+  const len = Math.max(p1.length, p2.length);
+  for (let i = 0; i < len; i++) {
+    const num1 = p1[i] || 0;
+    const num2 = p2[i] || 0;
+    if (num1 > num2) return 1;
+    if (num1 < num2) return -1;
+  }
+  return 0;
+};
+
+const ADMOB_CONFIG = {
+  appId: 'ca-app-pub-8825065858193656~5170875046',
+  rewardedAdUnitId: 'ca-app-pub-8825065858193656/9953437597',
+  appOpenAdUnitId: 'ca-app-pub-8825065858193656/2956162280'
+};
 
 const BACKEND_CONFIG = {
   gasUrl: 'https://script.google.com/macros/s/AKfycbzxKNv2JGtgAbLohzkvTwN5it7Xl3iKSKb6RK228k7JQxUnl-OPPKaXrjq5v-eaj9XrPQ/exec'
@@ -59,10 +80,11 @@ const KEYS = {
 };
 
 const DEFAULT_AD_CONFIG = {
-  network: 'builtin' as 'builtin' | 'adsterra' | 'monetag' | 'adsense',
+  network: 'admob' as 'admob' | 'adsterra' | 'monetag',
+  rewardedAdUnitId: ADMOB_CONFIG.rewardedAdUnitId,
+  appOpenAdUnitId: ADMOB_CONFIG.appOpenAdUnitId,
   adsterraDirectLink: '',
-  monetagZoneId: '',
-  adSensePublisherId: ''
+  monetagZoneId: ''
 };
 
 const PLAN_LIMITS: Record<string, number> = {
@@ -237,94 +259,6 @@ export const normalizeSignalTargets = (s: any): TradingSignal => {
 };
 
 // -------------------------------------------------------------
-// REWARDED VIDEO ADS CONFIGURATION & AUDIO SYNTHESIZER
-// -------------------------------------------------------------
-interface SponsoredAd {
-  id: string;
-  sponsor: string;
-  sponsorTagline: string;
-  sponsorBadge: string;
-  title: string;
-  ctaText: string;
-  ctaUrl: string;
-  videoUrl: string;
-  logoEmoji: string;
-  accentColor: string;
-}
-
-const REWARDED_ADS: SponsoredAd[] = [
-  {
-    id: 'ad-binance',
-    sponsor: 'Binance Global VIP',
-    sponsorTagline: 'World\'s largest crypto exchange with lowest 0.075% trading fee',
-    sponsorBadge: 'Official Crypto Sponsor',
-    title: 'Trade BTC, ETH & 350+ Crypto Pairs with AI Precision',
-    ctaText: 'Claim $100 Welcome Bonus',
-    ctaUrl: 'https://accounts.binance.com/register',
-    videoUrl: 'https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4',
-    logoEmoji: '🟡',
-    accentColor: '#f59e0b'
-  },
-  {
-    id: 'ad-tradingview',
-    sponsor: 'TradingView Pro',
-    sponsorTagline: 'Industry-standard charting, multi-timeframe confluence & alerts',
-    sponsorBadge: 'Global Charting Partner',
-    title: 'Supercharge Your Technical Analysis with 100+ Indicators',
-    ctaText: 'Start 30-Day Free Trial',
-    ctaUrl: 'https://www.tradingview.com',
-    videoUrl: 'https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.480p.vp9.webm',
-    logoEmoji: '📈',
-    accentColor: '#00d2ff'
-  },
-  {
-    id: 'ad-bybit',
-    sponsor: 'Bybit Derivatives',
-    sponsorTagline: 'AI quantitative bots & 100x high-liquidity futures terminal',
-    sponsorBadge: 'Institutional Trading Partner',
-    title: 'Copy Master Traders Automatically 24/7 with Zero Slippage',
-    ctaText: 'Get VIP Welcome Rewards',
-    ctaUrl: 'https://www.bybit.com',
-    videoUrl: 'https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4',
-    logoEmoji: '⚡',
-    accentColor: '#10b981'
-  }
-];
-
-const playRewardAudio = (type: 'tick' | 'victory') => {
-  try {
-    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-    if (!AudioCtx) return;
-    const ctx = new AudioCtx();
-    if (type === 'tick') {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(800, ctx.currentTime);
-      gain.gain.setValueAtTime(0.04, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.08);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start();
-      osc.stop(ctx.currentTime + 0.08);
-    } else {
-      [523.25, 659.25, 783.99, 1046.50].forEach((freq, i) => {
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = 'triangle';
-        osc.frequency.setValueAtTime(freq, ctx.currentTime + i * 0.09);
-        gain.gain.setValueAtTime(0.12, ctx.currentTime + i * 0.09);
-        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + i * 0.09 + 0.35);
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.start(ctx.currentTime + i * 0.09);
-        osc.stop(ctx.currentTime + i * 0.09 + 0.35);
-      });
-    }
-  } catch {}
-};
-
-// -------------------------------------------------------------
 // MAIN COMPONENT
 // -------------------------------------------------------------
 export default function App() {
@@ -377,7 +311,6 @@ export default function App() {
       return DEFAULT_AD_CONFIG;
     }
   });
-  const [adminAdSaving, setAdminAdSaving] = useState(false);
 
   // User State (Strictly initialized from localStorage - Clears any legacy default credentials)
   const [user, setUser] = useState<UserProfile | null>(() => {
@@ -416,12 +349,8 @@ export default function App() {
   const [authError, setAuthError] = useState('');
   const [redeemCode, setRedeemCode] = useState('');
 
-  // Rewarded Ads State (Active only when Quota is Depleted)
-  const [rewardAdModalOpen, setRewardAdModalOpen] = useState(false);
-  const [adSecondsLeft, setAdSecondsLeft] = useState(15);
-  const [isAdRewardGranted, setIsAdRewardGranted] = useState(false);
-  const [isAdMuted, setIsAdMuted] = useState(true);
-  const [currentAdIndex, setCurrentAdIndex] = useState(0);
+  // Google AdMob Real Video Ads State
+  const [isAdLoading, setIsAdLoading] = useState(false);
   const [adConfig, setAdConfig] = useState(() => {
     try {
       const saved = localStorage.getItem(KEYS.AD_CONFIG);
@@ -434,20 +363,7 @@ export default function App() {
   const saveAdConfig = (newConfig: typeof DEFAULT_AD_CONFIG) => {
     setAdConfig(newConfig);
     localStorage.setItem(KEYS.AD_CONFIG, JSON.stringify(newConfig));
-    showToast('Ad network settings mehfooz ho gayi hain!', 'success');
-  };
-
-  const openRewardAdModal = () => {
-    if (adConfig.network === 'adsterra' && adConfig.adsterraDirectLink) {
-      try {
-        window.open(adConfig.adsterraDirectLink, '_blank', 'noopener,noreferrer');
-      } catch {}
-    }
-    setCurrentAdIndex(prev => (prev + 1) % REWARDED_ADS.length);
-    setAdSecondsLeft(15);
-    setIsAdRewardGranted(false);
-    setIsAdMuted(true);
-    setRewardAdModalOpen(true);
+    showToast('AdMob settings mehfooz ho gayi hain!', 'success');
   };
 
 
@@ -564,32 +480,82 @@ export default function App() {
   }, [callBackend]);
 
   // -------------------------------------------------------------
+  // FETCH GLOBAL AD CONFIG (From Google Sheet on startup & foreground)
+  // -------------------------------------------------------------
+  const fetchGlobalAdConfig = useCallback(async () => {
+    try {
+      const res = await callBackend('get_ad_config');
+      const fetched = res?.config || (res?.network ? res : null);
+      if (fetched && !res.error) {
+        setAdConfig((prev: typeof DEFAULT_AD_CONFIG) => {
+          const merged: typeof DEFAULT_AD_CONFIG = {
+            network: fetched.network || prev.network || DEFAULT_AD_CONFIG.network,
+            rewardedAdUnitId: fetched.rewardedAdUnitId || prev.rewardedAdUnitId || ADMOB_CONFIG.rewardedAdUnitId,
+            appOpenAdUnitId: fetched.appOpenAdUnitId || prev.appOpenAdUnitId || ADMOB_CONFIG.appOpenAdUnitId,
+            adsterraDirectLink: fetched.adsterraDirectLink !== undefined ? fetched.adsterraDirectLink : (prev.adsterraDirectLink || ''),
+            monetagZoneId: fetched.monetagZoneId !== undefined ? fetched.monetagZoneId : (prev.monetagZoneId || '')
+          };
+          localStorage.setItem(KEYS.AD_CONFIG, JSON.stringify(merged));
+          return merged;
+        });
+
+        setAdminAdSettings((prev: typeof DEFAULT_AD_CONFIG) => ({
+          network: fetched.network || prev.network || DEFAULT_AD_CONFIG.network,
+          rewardedAdUnitId: fetched.rewardedAdUnitId || prev.rewardedAdUnitId || ADMOB_CONFIG.rewardedAdUnitId,
+          appOpenAdUnitId: fetched.appOpenAdUnitId || prev.appOpenAdUnitId || ADMOB_CONFIG.appOpenAdUnitId,
+          adsterraDirectLink: fetched.adsterraDirectLink !== undefined ? fetched.adsterraDirectLink : (prev.adsterraDirectLink || ''),
+          monetagZoneId: fetched.monetagZoneId !== undefined ? fetched.monetagZoneId : (prev.monetagZoneId || '')
+        }));
+      }
+    } catch (e) {
+      console.warn('[AdConfig] Global config fetch fallback to local/defaults:', e);
+    }
+  }, [callBackend]);
+
+  // -------------------------------------------------------------
   // GOOGLE SHEET USER & QUOTA VERIFICATION
   // -------------------------------------------------------------
   const verifyAndSyncWithGoogleSheet = useCallback(async (username: string): Promise<number | null> => {
     if (!username || username === 'guest') return null;
     setIsSheetSyncing(true);
     try {
-      const res = await callBackend('quota', { username });
-      if (res && !res.error && res.signalsLeft !== undefined) {
-        const fresh = Number(res.signalsLeft);
+      const res = await callBackend('quota', { username: username.trim() });
+      if (res && !res.error && res.signalsLeft !== undefined && res.signalsLeft !== null) {
+        const fresh = Math.max(0, Number(res.signalsLeft));
+        const planFromSheet = String(res.premiumPlan || 'FREE').toUpperCase() as any;
+        const quotaLimit = Number(res.quotaLimit) || PLAN_LIMITS[planFromSheet] || 1;
+
         setUser(prev => {
-          if (!prev) return null;
-          const planFromSheet = String(res.premiumPlan || prev.plan).toUpperCase() as any;
-          const quotaLimit = Number(res.quotaLimit) || PLAN_LIMITS[planFromSheet] || 1;
+          const current: UserProfile = prev || {
+            username: username.trim(),
+            plan: planFromSheet,
+            planBaseQuota: quotaLimit,
+            dailyQuotaLeft: fresh,
+            lastResetDate: new Date().toDateString(),
+            referralCode: username.substring(0, 4).toUpperCase(),
+            referralsCount: 0,
+            referralBonus: 0,
+            isSheetVerified: true
+          };
+
           const updated: UserProfile = {
-            ...prev,
+            ...current,
             dailyQuotaLeft: fresh,
             planBaseQuota: quotaLimit,
             plan: planFromSheet,
             isSheetVerified: true
           };
-          const rawDb = localStorage.getItem(KEYS.USERS_DB);
-          const db = rawDb ? JSON.parse(rawDb) : {};
-          db[username] = updated;
-          localStorage.setItem(KEYS.USERS_DB, JSON.stringify(db));
+
+          try {
+            const rawDb = localStorage.getItem(KEYS.USERS_DB);
+            const db = rawDb ? JSON.parse(rawDb) : {};
+            db[username.trim()] = updated;
+            localStorage.setItem(KEYS.USERS_DB, JSON.stringify(db));
+          } catch {}
+
           return updated;
         });
+
         return fresh;
       }
       if (res && res.error && res.message && res.message.includes('User nahi mila')) {
@@ -603,7 +569,22 @@ export default function App() {
     }
   }, [callBackend]);
 
-  const loadUserProfile = (username: string) => {
+  const handleManualSheetSync = async () => {
+    if (!user?.username) {
+      showToast('Pehle login karein!', 'info');
+      setLoginModalOpen(true);
+      return;
+    }
+    showToast('Google Sheet se sync ho raha hai...', 'info');
+    const fresh = await verifyAndSyncWithGoogleSheet(user.username);
+    if (fresh !== null) {
+      showToast(`✅ Google Sheet Synced! Quota: ${fresh.toFixed(2)} signals`, 'success');
+    } else {
+      showToast('⚠️ Google Sheet se rabta nahi ho saka ya user nahi mila.', 'error');
+    }
+  };
+
+  const loadUserProfile = (username: string, password?: string) => {
     const rawDb = localStorage.getItem(KEYS.USERS_DB);
     const db = rawDb ? JSON.parse(rawDb) : {};
     let profile = db[username];
@@ -611,6 +592,7 @@ export default function App() {
     if (!profile) {
       profile = {
         username,
+        password: password || '',
         plan: 'FREE',
         planBaseQuota: 1,
         dailyQuotaLeft: 1,
@@ -620,6 +602,10 @@ export default function App() {
         referralBonus: 0,
         isSheetVerified: false
       };
+      db[username] = profile;
+      localStorage.setItem(KEYS.USERS_DB, JSON.stringify(db));
+    } else if (password) {
+      profile.password = password;
       db[username] = profile;
       localStorage.setItem(KEYS.USERS_DB, JSON.stringify(db));
     }
@@ -966,6 +952,39 @@ export default function App() {
     loadJournals();
     fetchMarketTickers();
     fetchSheetAccuracy();
+    fetchGlobalAdConfig();
+
+    // Re-sync Global Settings from Google Sheet when app returns from background to foreground
+    const handleAppForeground = () => {
+      if (document.visibilityState === 'visible') {
+        fetchGlobalAdConfig();
+      }
+    };
+    document.addEventListener('visibilitychange', handleAppForeground);
+    window.addEventListener('focus', handleAppForeground);
+
+    // Initialize Google AdMob & Non-blocking App Open Ad on Native Android
+    if (Capacitor.isNativePlatform()) {
+      (async () => {
+        try {
+          await AdMob.initialize({
+            initializeForTesting: false
+          });
+          console.log('[AdMob] Google Mobile Ads SDK initialized successfully');
+
+          // Load & show App Open Ad asynchronously without blocking startup
+          const openAdId = adConfig.appOpenAdUnitId || ADMOB_CONFIG.appOpenAdUnitId;
+          try {
+            await AdMob.loadAppOpen({ adId: openAdId });
+            await AdMob.showAppOpen();
+          } catch (openErr) {
+            console.log('[AdMob] App Open Ad skipped or unavailable:', openErr);
+          }
+        } catch (adInitErr) {
+          console.warn('[AdMob] Initialization warning:', adInitErr);
+        }
+      })();
+    }
 
     const interval = setInterval(fetchMarketTickers, 10000);
 
@@ -973,8 +992,10 @@ export default function App() {
       isMounted = false;
       clearTimeout(timer);
       clearInterval(interval);
+      document.removeEventListener('visibilitychange', handleAppForeground);
+      window.removeEventListener('focus', handleAppForeground);
     };
-  }, [fetchMarketTickers, fetchSheetAccuracy]);
+  }, [fetchMarketTickers, fetchSheetAccuracy, fetchGlobalAdConfig, adConfig.appOpenAdUnitId]);
 
   // Sync with Google Sheet when user changes/logs in
   useEffect(() => {
@@ -982,15 +1003,6 @@ export default function App() {
       verifyAndSyncWithGoogleSheet(user.username);
     }
   }, [user?.username, verifyAndSyncWithGoogleSheet]);
-
-  // Load Ad Network Config from backend / local
-  useEffect(() => {
-    callBackend('get_ad_config').then((res: any) => {
-      if (res && !res.error && res.network) {
-        setAdConfig((prev: typeof DEFAULT_AD_CONFIG) => ({ ...prev, ...res }));
-      }
-    }).catch(() => {});
-  }, [callBackend]);
 
   // -------------------------------------------------------------
   // ADMIN STATUS VERIFICATION
@@ -1031,10 +1043,12 @@ export default function App() {
   useEffect(() => {
     callBackend('check_app_version', { currentVersion: CURRENT_APP_VERSION })
       .then((res: any) => {
-        if (res && (res.update_available === true || res.updateAvailable === true)) {
+        const latest = res?.latest_version || res?.latestVersion || res?.version;
+        // Strictly only show update modal if latest version is newer than current 1.0.2
+        if (latest && compareVersions(latest, CURRENT_APP_VERSION) > 0) {
           setUpdateData({
             downloadUrl: res.download_url || res.downloadUrl || 'https://cryptoworld.vip/download',
-            latestVersion: res.latest_version || res.latestVersion || res.version || '1.1.0',
+            latestVersion: latest,
             releaseNotes: res.release_notes || res.notes || res.message || 'CryptoWorld ka naya version release ho chuka hai! Behtar Binance data stream aur VIP features shamil hain.'
           });
           setUpdateModalOpen(true);
@@ -1114,33 +1128,11 @@ export default function App() {
         setAdminInputKey('');
         showToast('Super Admin Dashboard Unlocked!', 'success');
         fetchAdminUsers();
-      } else if (pass === 'Admin@zulqarnain.1' || pass === 'Admin@Zulqarnain2026!') {
-        const fallbackToken = 'CW-ADMIN-' + Date.now();
-        localStorage.setItem('cw_admin_token', fallbackToken);
-        localStorage.setItem('cw_admin_token_expires', String(Date.now() + 3600000));
-        setIsAdmin(true);
-        setAdminLoginModalOpen(false);
-        setActiveTab('admin');
-        setAdminInputKey('');
-        showToast('Super Admin Dashboard Unlocked!', 'success');
-        fetchAdminUsers();
       } else {
         setAdminAuthError(res?.message || 'Ghalat Master Passphrase! Dastaras radd kar di gayi.');
       }
     } catch {
-      if (pass === 'Admin@zulqarnain.1' || pass === 'Admin@Zulqarnain2026!') {
-        const fallbackToken = 'CW-ADMIN-' + Date.now();
-        localStorage.setItem('cw_admin_token', fallbackToken);
-        localStorage.setItem('cw_admin_token_expires', String(Date.now() + 3600000));
-        setIsAdmin(true);
-        setAdminLoginModalOpen(false);
-        setActiveTab('admin');
-        setAdminInputKey('');
-        showToast('Super Admin Dashboard Unlocked!', 'success');
-        fetchAdminUsers();
-      } else {
-        setAdminAuthError('Backend se rabta nahi ho saka. Passphrase check karein.');
-      }
+      setAdminAuthError('Backend se rabta nahi ho saka. Internet connection check karein.');
     } finally {
       setAdminAuthLoading(false);
     }
@@ -1256,29 +1248,35 @@ export default function App() {
     showToast(`${purged} used codes database se clean ho gaye.`, 'success');
   };
 
-  const handleSaveAdConfig = async () => {
-    setAdminAdSaving(true);
-    const adminToken = localStorage.getItem('cw_admin_token') || '';
-    try {
-      const res = await callBackend('set_ad_config', { adminToken, config: adminAdSettings });
-      if (res && res.error) {
-        showToast(res.message || 'Ad config save nahi ho saka.', 'error');
-        setAdminAdSaving(false);
-        return;
-      }
-    } catch {}
+  const handleSaveAdConfig = () => {
     localStorage.setItem(KEYS.AD_CONFIG, JSON.stringify(adminAdSettings));
     setAdConfig(adminAdSettings);
-    setAdminAdSaving(false);
-    showToast(`Ad Network settings (${adminAdSettings.network.toUpperCase()}) save ho gayi!`, 'success');
+    showToast('Settings Saved Successfully', 'success');
+
+    // Background Google Sheet Sync (Applies globally across all worldwide users)
+    const adminToken = localStorage.getItem('cw_admin_token') || '';
+    callBackend('set_ad_config', {
+      config: adminAdSettings,
+      adminToken
+    }).catch(err => {
+      console.warn('[AdConfig] Background sheet sync warning:', err);
+    });
   };
 
   const handleResetAdConfig = () => {
-    if (confirm('Kya aap Ad Network ko default built-in ads par reset karna chahte hain?')) {
+    if (confirm('Kya aap Ad Network ko default Google AdMob par reset karna chahte hain?')) {
       setAdminAdSettings(DEFAULT_AD_CONFIG);
       localStorage.setItem(KEYS.AD_CONFIG, JSON.stringify(DEFAULT_AD_CONFIG));
       setAdConfig(DEFAULT_AD_CONFIG);
-      showToast('Ad config reset to defaults', 'info');
+      showToast('Settings Saved Successfully', 'info');
+
+      const adminToken = localStorage.getItem('cw_admin_token') || '';
+      callBackend('set_ad_config', {
+        config: DEFAULT_AD_CONFIG,
+        adminToken
+      }).catch(err => {
+        console.warn('[AdConfig] Background sheet reset warning:', err);
+      });
     }
   };
 
@@ -1303,46 +1301,75 @@ export default function App() {
   }, [adminUsers, adminUserSearch]);
 
   // -------------------------------------------------------------
-  // REWARDED VIDEO AD COUNTDOWN TIMER & QUOTA REWARD HANDLER
+  // REAL GOOGLE ADMOB REWARDED AD (NO TIMER - STRICT REWARD VERIFICATION)
   // -------------------------------------------------------------
-  useEffect(() => {
-    let timer: any = null;
-    if (rewardAdModalOpen && !isAdRewardGranted) {
-      timer = setInterval(() => {
-        setAdSecondsLeft(prev => {
-          if (prev <= 1) {
-            clearInterval(timer);
-            setIsAdRewardGranted(true);
-            playRewardAudio('victory');
-            return 0;
-          }
-          if (!isAdMuted && prev % 3 === 0) {
-            playRewardAudio('tick');
-          }
-          return prev - 1;
-        });
-      }, 1000);
+  const handleWatchRewardedAd = async () => {
+    if (!user) {
+      setLoginModalOpen(true);
+      return;
     }
-    return () => {
-      if (timer) clearInterval(timer);
-    };
-  }, [rewardAdModalOpen, isAdRewardGranted, isAdMuted]);
+    if (isAdLoading) return;
 
-  const claimRewardAdQuota = async () => {
-    if (!user) return;
+    const adUnitId = adConfig.rewardedAdUnitId || ADMOB_CONFIG.rewardedAdUnitId;
+
+    // Web Browser Check (Real AdMob strictly runs on installed Android APK)
+    if (!Capacitor.isNativePlatform()) {
+      showToast('⚠️ Test Ad sirf Android App mein chal sakta hai, Web par nahi.', 'error');
+      return;
+    }
+
+    // Native Mobile AdMob flow
+    setIsAdLoading(true);
+    showToast('Loading Google AdMob video...', 'info');
+
+    // Auto-retry helper: Retry once on failure before showing error
+    const prepareRewardAd = async (isRetry = false): Promise<boolean> => {
+      try {
+        await AdMob.prepareRewardVideoAd({ adId: adUnitId });
+        return true;
+      } catch (err) {
+        if (!isRetry) {
+          console.warn('[AdMob] First load attempt failed, retrying once...', err);
+          await new Promise(r => setTimeout(r, 1500));
+          return prepareRewardAd(true);
+        }
+        console.error('[AdMob] Rewarded Ad load failed after auto-retry:', err);
+        return false;
+      }
+    };
+
     try {
-      const res = await callBackend('watch_ad_reward', { username: user.username });
-      if (res && res.error) {
-        showToast(res.message || 'Ad reward claim nahi ho saka.', 'error');
+      const isReady = await prepareRewardAd(false);
+      if (!isReady) {
+        setIsAdLoading(false);
+        showToast('Ad could not be loaded. Please check your internet and try again.', 'error');
         return;
       }
-      await verifyAndSyncWithGoogleSheet(user.username);
-      showToast('🎉 Mubarak! Ad mukammal dekhne par +1 Signal Quota mil gaya!', 'success');
-      setRewardAdModalOpen(false);
-      setIsAdRewardGranted(false);
-      setAdSecondsLeft(15);
-    } catch {
-      showToast('Ad reward verify nahi ho saka. Dobara koshish karein.', 'error');
+
+      // Show the loaded rewarded ad. Resolves with AdMobRewardItem ONLY when user completes the video!
+      const rewardItem = await AdMob.showRewardVideoAd();
+      setIsAdLoading(false);
+
+      if (rewardItem) {
+        showToast('🎉 Ad mukammal dekhi! Quota update ho raha hai...', 'info');
+        try {
+          const res = await callBackend('watch_ad_reward', { username: user.username });
+          if (res && res.error) {
+            showToast(res.message || 'Ad reward claim nahi ho saka.', 'error');
+            return;
+          }
+          await verifyAndSyncWithGoogleSheet(user.username);
+          showToast('🎉 Mubarak! Real AdMob video mukammal dekhne par +1 Signal Quota mil gaya!', 'success');
+        } catch {
+          showToast('Ad reward verify nahi ho saka. Dobara koshish karein.', 'error');
+        }
+      } else {
+        showToast('Ad reward verify nahi hua. Quota paaney ke liye video mukammal dekhna lazmi hai.', 'info');
+      }
+    } catch (err) {
+      setIsAdLoading(false);
+      console.error('[AdMob] Error playing reward video ad:', err);
+      showToast('Ad could not be loaded. Please check your internet and try again.', 'error');
     }
   };
 
@@ -1557,7 +1584,7 @@ export default function App() {
 
     if (quotaLeft <= 0) {
       showToast('Aapka quota khatam ho chuka hai! Reward ad dekh kar +1 free signal hasil karein.', 'info');
-      openRewardAdModal();
+      handleWatchRewardedAd();
       return;
     }
 
@@ -1930,28 +1957,70 @@ export default function App() {
             setLoginModalOpen(false);
             return;
           }
+          if (res.message && (res.message.toLowerCase().includes('already') || res.message.toLowerCase().includes('pehle se') || res.message.toLowerCase().includes('exists'))) {
+            setAuthError('Yeh username pehle se registered hai! Password enter karein aur Login button dabayein.');
+            setAuthMode('login');
+            return;
+          }
           setAuthError(res.message || 'Registration nakam hui.');
           return;
         }
         localStorage.setItem(KEYS.USER, u);
-        loadUserProfile(u);
+        loadUserProfile(u, p);
         verifyAndSyncWithGoogleSheet(u);
         setLoginModalOpen(false);
         showToast(`Mubarak! Account ${u} Google Sheet mein kamyabi se register ho gaya!`, 'success');
       } else {
+        // LOGIN MODE
         const res = await callBackend('login', { username: u, password: p });
         if (res && res.error) {
-          setAuthError(res.message || 'Ghalat username ya password.');
+          // Check local cache fallback
+          const rawDb = localStorage.getItem(KEYS.USERS_DB);
+          const db = rawDb ? JSON.parse(rawDb) : {};
+          if (db[u] && db[u].password && db[u].password === p) {
+            localStorage.setItem(KEYS.USER, u);
+            loadUserProfile(u, p);
+            verifyAndSyncWithGoogleSheet(u);
+            setLoginModalOpen(false);
+            showToast(`Khushamdeed ${u.toUpperCase()}! Login kamyab raha.`, 'success');
+            return;
+          }
+
+          if (res.message && (res.message.toLowerCase().includes('nahi mila') || res.message.toLowerCase().includes('not found'))) {
+            setAuthError('Yeh username Google Sheet mein nahi mila. Agar aap naye hain to oper "Register" tab par click karein.');
+          } else if (res.message && (res.message.toLowerCase().includes('ghalat') || res.message.toLowerCase().includes('password'))) {
+            setAuthError('Ghalat Password! Baraye meharbani sahi password enter karein.');
+          } else {
+            // Server connection issue fallback
+            if (db[u]) {
+              localStorage.setItem(KEYS.USER, u);
+              loadUserProfile(u, p);
+              setLoginModalOpen(false);
+              showToast(`Khushamdeed ${u.toUpperCase()}! (Offline Mode Login)`, 'info');
+              return;
+            }
+            setAuthError(res.message || 'Backend se rabta nahi ho saka. Dobara koshish karein.');
+          }
           return;
         }
         localStorage.setItem(KEYS.USER, u);
-        loadUserProfile(u);
+        loadUserProfile(u, p);
         verifyAndSyncWithGoogleSheet(u);
         setLoginModalOpen(false);
         showToast(`Khushamdeed ${u.toUpperCase()}! Google Sheet se login tasdeeq ho gayi.`, 'success');
       }
     } catch {
-      setAuthError('Google Sheet server se rabta nahi ho saka.');
+      // Local recovery if server is unreachable
+      const rawDb = localStorage.getItem(KEYS.USERS_DB);
+      const db = rawDb ? JSON.parse(rawDb) : {};
+      if (db[u] && (!db[u].password || db[u].password === p)) {
+        localStorage.setItem(KEYS.USER, u);
+        loadUserProfile(u, p);
+        setLoginModalOpen(false);
+        showToast(`Khushamdeed ${u.toUpperCase()}! Local session restored.`, 'info');
+      } else {
+        setAuthError('Google Sheet server se rabta nahi ho saka. Internet connection check karein.');
+      }
     }
   };
 
@@ -2345,7 +2414,7 @@ export default function App() {
         </div>
 
         <div className="sidebar-footer">
-          <div>CryptoWorld v2.5 (Material React)</div>
+          <div>CryptoWorld v{CURRENT_APP_VERSION} (Material React)</div>
           <div style={{ marginTop: '4px' }}>Google Sheets Cloud DB & Binance Live</div>
         </div>
       </aside>
@@ -2538,7 +2607,8 @@ export default function App() {
                   <button
                     type="button"
                     className="btn-reward-ad"
-                    onClick={openRewardAdModal}
+                    onClick={handleWatchRewardedAd}
+                    disabled={isAdLoading}
                   >
                     <div className="reward-ad-btn-content">
                       <div className="reward-ad-icon-pulse">
@@ -2546,10 +2616,10 @@ export default function App() {
                       </div>
                       <div className="reward-ad-btn-texts">
                         <span className="reward-ad-title">
-                          <Film size={18} /> WATCH AD TO EARN +1 SIGNAL QUOTA
+                          <Film size={18} /> {isAdLoading ? 'LOADING REAL ADMOB VIDEO...' : 'WATCH AD TO EARN +1 SIGNAL QUOTA'}
                         </span>
                         <span className="reward-ad-subtitle">
-                          Daily quota khatam ho gaya! 15s real video ad dekh kar foran free signal unlock karein
+                          Daily quota khatam ho gaya! Google AdMob video mukammal dekh kar foran free signal unlock karein
                         </span>
                       </div>
                       <div className="reward-ad-badge">+1 SIGNAL</div>
@@ -3228,12 +3298,13 @@ export default function App() {
                     <>
                       <button
                         className="btn-secondary"
-                        onClick={() => verifyAndSyncWithGoogleSheet(user.username)}
+                        onClick={handleManualSheetSync}
+                        disabled={isSheetSyncing}
                         style={{ fontSize: '0.8rem', padding: '6px 12px' }}
                         title="Sync latest quota and plan from Google Sheet"
                       >
                         <RefreshCw size={12} className={isSheetSyncing ? 'animate-spin' : ''} style={{ marginRight: '4px' }} />
-                        Sync Sheet
+                        {isSheetSyncing ? 'Syncing...' : 'Sync Sheet'}
                       </button>
                       <button className="btn-secondary" onClick={handleLogout} style={{ fontSize: '0.8rem', padding: '6px 12px' }}>
                         Logout
@@ -3822,10 +3893,9 @@ export default function App() {
                     {/* Network Cards */}
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '12px', marginBottom: '20px' }}>
                       {[
-                        { id: 'builtin', name: 'Built-in Native Ads', desc: 'Pre-loaded high CPM crypto video sponsors (Binance, Bybit, Ledger, TradingView)', badge: 'Recommended' },
-                        { id: 'adsterra', name: 'Adsterra Direct Link', desc: 'Direct Link SmartURL for maximum mobile webview revenue', badge: 'High CPM' },
-                        { id: 'monetag', name: 'Monetag Zone', desc: 'In-App rewarded interstitial & push zones', badge: 'Instant Payout' },
-                        { id: 'adsense', name: 'Google AdSense / AdMob', desc: 'Official Google AdMob Rewarded Video Unit ID', badge: 'Tier 1' },
+                        { id: 'admob', name: 'Google AdMob (Official)', desc: 'Direct native Android AdMob Rewarded Video & App Open Ads', badge: 'Active / Tier 1' },
+                        { id: 'adsterra', name: 'Adsterra Direct Link', desc: 'Direct Link SmartURL for fallback monetization', badge: 'Backup' },
+                        { id: 'monetag', name: 'Monetag Zone', desc: 'In-App rewarded interstitial & push zones', badge: 'Backup' },
                       ].map(net => {
                         const isSelected = adminAdSettings.network === net.id;
                         return (
@@ -3857,6 +3927,38 @@ export default function App() {
 
                     {/* Input configuration for selected network */}
                     <div style={{ background: '#090d16', padding: '16px', borderRadius: '10px', border: '1px solid var(--border-color)', marginBottom: '18px' }}>
+                      {adminAdSettings.network === 'admob' && (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                          <div style={{ background: 'rgba(0, 230, 118, 0.08)', border: '1px solid rgba(0, 230, 118, 0.25)', padding: '12px 14px', borderRadius: '8px', fontSize: '0.82rem', color: '#00e676' }}>
+                            <strong>✅ Google AdMob Active:</strong> Real Ads loaded directly through native Android SDK without simulated timers.
+                            <div style={{ marginTop: '6px', fontSize: '0.74rem', color: '#94a3b8' }}>
+                              App ID: <code>{ADMOB_CONFIG.appId}</code> (Configured in AndroidManifest.xml)
+                            </div>
+                          </div>
+
+                          <div className="form-group" style={{ marginBottom: 0 }}>
+                            <label className="form-label">Rewarded Video Ad Unit ID (Quota Unlock)</label>
+                            <input
+                              type="text"
+                              className="form-input"
+                              placeholder="ca-app-pub-8825065858193656/9953437597"
+                              value={adminAdSettings.rewardedAdUnitId || ''}
+                              onChange={e => setAdminAdSettings({ ...adminAdSettings, rewardedAdUnitId: e.target.value })}
+                            />
+                          </div>
+
+                          <div className="form-group" style={{ marginBottom: 0 }}>
+                            <label className="form-label">App Open Ad Unit ID (Startup Splash)</label>
+                            <input
+                              type="text"
+                              className="form-input"
+                              placeholder="ca-app-pub-8825065858193656/2956162280"
+                              value={adminAdSettings.appOpenAdUnitId || ''}
+                              onChange={e => setAdminAdSettings({ ...adminAdSettings, appOpenAdUnitId: e.target.value })}
+                            />
+                          </div>
+                        </div>
+                      )}
                       {adminAdSettings.network === 'adsterra' && (
                         <div className="form-group" style={{ marginBottom: 0 }}>
                           <label className="form-label">Adsterra Direct Link URL</label>
@@ -3881,23 +3983,6 @@ export default function App() {
                           />
                         </div>
                       )}
-                      {adminAdSettings.network === 'adsense' && (
-                        <div className="form-group" style={{ marginBottom: 0 }}>
-                          <label className="form-label">Google AdSense / AdMob Rewarded Ad Unit ID</label>
-                          <input
-                            type="text"
-                            className="form-input"
-                            placeholder="ca-pub-XXXXXXXXXXXXXXXX / ca-app-pub-..."
-                            value={adminAdSettings.adSensePublisherId}
-                            onChange={e => setAdminAdSettings({ ...adminAdSettings, adSensePublisherId: e.target.value })}
-                          />
-                        </div>
-                      )}
-                      {adminAdSettings.network === 'builtin' && (
-                        <div style={{ color: 'var(--accent-green)', fontSize: '0.85rem' }}>
-                          ✅ Built-in Native Crypto Ads active hain (Binance VIP, Bybit, Ledger, TradingView). Kisi external configuration ki zaroorat nahi.
-                        </div>
-                      )}
                     </div>
 
                     {/* Save, Reset, Test Buttons */}
@@ -3906,25 +3991,19 @@ export default function App() {
                         type="button"
                         className="btn-primary"
                         onClick={handleSaveAdConfig}
-                        disabled={adminAdSaving}
                         style={{ padding: '10px 18px', fontSize: '0.85rem' }}
                       >
-                        {adminAdSaving ? 'Saving to Google Sheet...' : '💾 Save Ad Network Settings'}
+                        💾 Save Ad Settings
                       </button>
                       <button
                         type="button"
                         className="btn-secondary"
-                        onClick={() => {
-                          setCurrentAdIndex(Math.floor(Math.random() * REWARDED_ADS.length));
-                          setAdSecondsLeft(15);
-                          setIsAdRewardGranted(false);
-                          setRewardAdModalOpen(true);
-                          showToast('Testing rewarded video ad flow...', 'info');
-                        }}
+                        onClick={handleWatchRewardedAd}
+                        disabled={isAdLoading}
                         style={{ padding: '10px 18px', fontSize: '0.85rem' }}
                       >
                         <Play size={14} style={{ marginRight: '6px' }} />
-                        Test Rewarded Ad
+                        {isAdLoading ? 'Loading AdMob...' : 'Test Rewarded Ad'}
                       </button>
                       <button
                         type="button"
@@ -4212,149 +4291,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Rewarded Video Ad Modal Player (Strictly activated from Generate Button on Quota Exhaustion) */}
-      {rewardAdModalOpen && (
-        <div className="modal-overlay active">
-          <div className="ad-modal-card">
-            {/* Ad Top Bar */}
-            <div className="ad-overlay-top">
-              <div className="ad-badge-sponsor">
-                <span>{REWARDED_ADS[currentAdIndex].logoEmoji}</span>
-                <span>{REWARDED_ADS[currentAdIndex].sponsorBadge}</span>
-              </div>
 
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <button
-                  type="button"
-                  className="ad-sound-btn"
-                  onClick={() => setIsAdMuted(m => !m)}
-                  title={isAdMuted ? 'Unmute Audio' : 'Mute Audio'}
-                >
-                  {isAdMuted ? <VolumeX size={14} /> : <Volume2 size={14} />}
-                  <span>{isAdMuted ? 'Unmute' : 'Muted'}</span>
-                </button>
-
-                <div className={`ad-timer-pill ${isAdRewardGranted ? 'unlocked' : ''}`}>
-                  {isAdRewardGranted ? (
-                    <>
-                      <CheckCircle2 size={14} />
-                      <span>REWARD UNLOCKED</span>
-                    </>
-                  ) : (
-                    <>
-                      <Lock size={12} />
-                      <span>Reward in: {adSecondsLeft}s</span>
-                    </>
-                  )}
-                </div>
-
-                {!isAdRewardGranted ? (
-                  <button
-                    type="button"
-                    className="ad-close-btn-locked"
-                    onClick={() => showToast(`⚠️ Reward paaney ke liye ad poora 15s dekhna lazmi hai! (${adSecondsLeft}s baqi)`, 'info')}
-                    title="Watch full ad to earn quota"
-                  >
-                    <Lock size={12} /> Skip ({adSecondsLeft}s)
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    className="ad-close-btn-unlocked"
-                    onClick={claimRewardAdQuota}
-                  >
-                    <CheckCircle2 size={14} /> Claim +1 Quota
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {/* Real Video Player */}
-            <div className="ad-video-container">
-              <video
-                key={REWARDED_ADS[currentAdIndex].id}
-                className="ad-video-element"
-                src={REWARDED_ADS[currentAdIndex].videoUrl}
-                autoPlay
-                playsInline
-                muted={isAdMuted}
-                loop
-              />
-
-              {/* Dynamic Live Trading Graphic Overlay on the Video */}
-              <div style={{ position: 'absolute', bottom: '12px', left: '14px', right: '14px', pointerEvents: 'none', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end' }}>
-                <div style={{ background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(8px)', padding: '8px 12px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.12)', display: 'inline-flex', alignItems: 'center', gap: '10px' }}>
-                  <span style={{ fontSize: '1.25rem' }}>{REWARDED_ADS[currentAdIndex].logoEmoji}</span>
-                  <div>
-                    <div style={{ fontSize: '0.82rem', fontWeight: 800, color: '#ffffff' }}>
-                      {REWARDED_ADS[currentAdIndex].title}
-                    </div>
-                    <div style={{ fontSize: '0.68rem', color: '#10b981', fontWeight: 600 }}>
-                      ● Official Partner | High-Frequency AI Execution
-                    </div>
-                  </div>
-                </div>
-
-                <div style={{ background: 'rgba(0,0,0,0.8)', padding: '4px 8px', borderRadius: '6px', fontSize: '0.68rem', color: '#fbbf24', border: '1px solid rgba(251,191,36,0.3)', fontWeight: 700 }}>
-                  AD 15s • REWARD: +1 SIGNAL
-                </div>
-              </div>
-            </div>
-
-            {/* Progress Bar */}
-            <div className="ad-progress-bar-wrap">
-              <div
-                className="ad-progress-bar-fill"
-                style={{ width: `${((15 - adSecondsLeft) / 15) * 100}%` }}
-              />
-            </div>
-
-            {/* Completion Banner */}
-            {isAdRewardGranted && (
-              <div className="ad-reward-celebration">
-                <div className="ad-reward-title">
-                  <Sparkles size={20} />
-                  <span>CONGRATULATIONS! +1 SIGNAL QUOTA EARNED!</span>
-                </div>
-                <p className="ad-reward-desc">
-                  Shandar! Aap ne ad mukammal dekh liya hai. Niche button daba kar quota claim karein aur foran naya AI trade signal generate karein.
-                </p>
-                <button
-                  type="button"
-                  className="ad-claim-action-btn"
-                  onClick={claimRewardAdQuota}
-                >
-                  <Gift size={18} />
-                  <span>CLAIM +1 SIGNAL & GENERATE NOW</span>
-                </button>
-              </div>
-            )}
-
-            {/* Ad Sponsor Info Footer */}
-            <div className="ad-overlay-bottom">
-              <div className="ad-sponsor-info">
-                <div className="ad-sponsor-logo">
-                  {REWARDED_ADS[currentAdIndex].logoEmoji}
-                </div>
-                <div className="ad-sponsor-texts">
-                  <h4>{REWARDED_ADS[currentAdIndex].sponsor}</h4>
-                  <p>{REWARDED_ADS[currentAdIndex].sponsorTagline}</p>
-                </div>
-              </div>
-
-              <a
-                href={REWARDED_ADS[currentAdIndex].ctaUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="ad-cta-btn"
-              >
-                <span>{REWARDED_ADS[currentAdIndex].ctaText}</span>
-                <ExternalLink size={14} />
-              </a>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* ========================================================= */}
       {/* FEATURE 1: IN-APP UPDATE CHECKER POPUP MODAL               */}

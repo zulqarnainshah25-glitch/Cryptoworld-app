@@ -1,4 +1,4 @@
-package com.cryptoworld.app;
+package vip.cryptoworld.app;
 
 import com.getcapacitor.BridgeActivity;
 
