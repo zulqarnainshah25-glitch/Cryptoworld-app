@@ -576,6 +576,7 @@ export default function App() {
       return;
     }
     showToast('Google Sheet se sync ho raha hai...', 'info');
+    fetchOpenSignalsFromSheet();
     const fresh = await verifyAndSyncWithGoogleSheet(user.username);
     if (fresh !== null) {
       showToast(`✅ Google Sheet Synced! Quota: ${fresh.toFixed(2)} signals`, 'success');
@@ -663,140 +664,168 @@ export default function App() {
     }
   };
 
+  // Guard to prevent duplicate update_outcome calls for the same Google Sheet row
+  const resolvingRowsRef = useRef<Set<number>>(new Set());
+
+  const fetchKlinesForSymbol = useCallback(async (symbol: string, interval = '1h', limit = 200): Promise<any[][]> => {
+    const klineEndpoints = [
+      `https://data-api.binance.vision/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`,
+      `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`,
+      `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`
+    ];
+    for (const url of klineEndpoints) {
+      try {
+        const res = await fetch(url);
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data) && data.length > 0) {
+            return data;
+          }
+        }
+      } catch {}
+    }
+    return [];
+  }, []);
+
   // -------------------------------------------------------------
   // REAL-TIME SIGNAL EVALUATION & GOOGLE SHEET RECORDING (TP & SL)
   // -------------------------------------------------------------
-  const evaluateActiveSignalsLive = useCallback((priceMap: Record<string, number>) => {
+  const evaluateActiveSignalsLive = useCallback((priceMap: Record<string, number>, klinesMap: Record<string, any[][]> = {}) => {
     const processSignal = (rawS: TradingSignal) => {
       const s = normalizeSignalTargets(rawS);
       if (s.resolved) return { sig: s, isNewlyResolved: false, isHitEvent: false, hitEventLabel: '' };
+      if (s.direction !== 'LONG' && s.direction !== 'SHORT') {
+        return { sig: s, isNewlyResolved: false, isHitEvent: false, hitEventLabel: '' };
+      }
+
       const livePrice = priceMap[s.symbol];
-      if (!livePrice) return { sig: s, isNewlyResolved: false, isHitEvent: false, hitEventLabel: '' };
+      const symbolKlines = klinesMap[s.symbol];
+      if (!livePrice && (!symbolKlines || symbolKlines.length === 0)) {
+        return { sig: s, isNewlyResolved: false, isHitEvent: false, hitEventLabel: '' };
+      }
 
       const isLong = s.direction === 'LONG';
+      const tpTarget = Number(s.takeProfit) || Number(s.tp2);
+      const slTarget = Number(s.stopLoss);
+
       let outcome: 'WIN' | 'LOSS' | null = null;
       let targetHit = s.targetHit || 'OPEN';
       let tp1Hit = s.tp1Hit || false;
       let tp2Hit = s.tp2Hit || false;
       let tp3Hit = s.tp3Hit || false;
       let closedPrice = s.closedPrice;
+      let closedTime = s.closedTime;
       let hitEventLabel = '';
 
-      if (isLong) {
-        // 1. Highest Target: TP3 Hit -> Signal closed with MAXIMUM WIN!
-        if (livePrice >= s.tp3) {
-          outcome = 'WIN';
-          targetHit = 'TP3';
-          tp1Hit = true;
-          tp2Hit = true;
-          tp3Hit = true;
-          closedPrice = s.tp3;
-          hitEventLabel = 'TP3';
-        }
-        // 2. TP2 Already Hit:
-        // "jab tak tp 2 hit hone ke baad tp2 ki price se markete niche ata hai to signal closed with win agar uper jata hai to tp3 hit hone ke bad closed with win"
-        else if (s.tp2Hit) {
-          if (livePrice < s.tp2) {
-            // Market pulled back below TP2 price -> Closed with WIN at TP2!
-            outcome = 'WIN';
-            targetHit = 'TP2';
-            tp1Hit = true;
-            tp2Hit = true;
-            closedPrice = s.tp2;
-            hitEventLabel = 'TP2_PULLBACK_WIN';
+      // 1. Check historical Binance candles (High/Low) after signal timestamp
+      if (Array.isArray(symbolKlines) && symbolKlines.length > 0) {
+        for (const k of symbolKlines) {
+          const openTime = Number(k[0]);
+          const high = parseFloat(k[2]);
+          const low = parseFloat(k[3]);
+          const closeTime = Number(k[6]) || Date.now();
+          if (!Number.isFinite(high) || !Number.isFinite(low)) continue;
+          // Only inspect candles that opened at or after signal timestamp
+          if (openTime < s.timestamp) continue;
+
+          if (isLong) {
+            if (high >= tpTarget) {
+              outcome = 'WIN';
+              targetHit = high >= s.tp3 ? 'TP3' : 'TP2';
+              tp1Hit = true;
+              tp2Hit = true;
+              tp3Hit = high >= s.tp3;
+              closedPrice = tpTarget;
+              closedTime = new Date(closeTime).toISOString();
+              hitEventLabel = targetHit;
+              break;
+            }
+            if (low <= slTarget) {
+              outcome = 'LOSS';
+              targetHit = 'SL';
+              closedPrice = slTarget;
+              closedTime = new Date(closeTime).toISOString();
+              hitEventLabel = 'SL';
+              break;
+            }
+            if (high >= s.tp1 && !tp1Hit) {
+              tp1Hit = true;
+              targetHit = 'TP1';
+              hitEventLabel = 'TP1';
+            }
           } else {
-            // Still above TP2, waiting and hunting for TP3!
-            tp1Hit = true;
-            tp2Hit = true;
-            targetHit = 'TP2';
+            if (low <= tpTarget) {
+              outcome = 'WIN';
+              targetHit = low <= s.tp3 ? 'TP3' : 'TP2';
+              tp1Hit = true;
+              tp2Hit = true;
+              tp3Hit = low <= s.tp3;
+              closedPrice = tpTarget;
+              closedTime = new Date(closeTime).toISOString();
+              hitEventLabel = targetHit;
+              break;
+            }
+            if (high >= slTarget) {
+              outcome = 'LOSS';
+              targetHit = 'SL';
+              closedPrice = slTarget;
+              closedTime = new Date(closeTime).toISOString();
+              hitEventLabel = 'SL';
+              break;
+            }
+            if (low <= s.tp1 && !tp1Hit) {
+              tp1Hit = true;
+              targetHit = 'TP1';
+              hitEventLabel = 'TP1';
+            }
           }
         }
-        // 3. First time hitting TP2:
-        else if (livePrice >= s.tp2) {
-          tp1Hit = true;
-          tp2Hit = true;
-          targetHit = 'TP2';
-          hitEventLabel = 'TP2';
-          // Signal stays OPEN hunting for TP3 runner!
-        }
-        // 4. First time hitting TP1:
-        else if (livePrice >= s.tp1 && !tp1Hit) {
-          tp1Hit = true;
-          targetHit = 'TP1';
-          hitEventLabel = 'TP1';
-          // Signal stays OPEN running towards TP2!
-        }
-        // 5. If TP1 was hit and price pulls back to entry/below:
-        else if (tp1Hit && livePrice <= s.entry) {
-          outcome = 'WIN';
-          targetHit = 'TP1';
-          closedPrice = s.tp1;
-          hitEventLabel = 'TP1_SECURED';
-        }
-        // 6. Stop Loss hit without hitting any TP:
-        else if (!tp1Hit && livePrice <= s.stopLoss) {
-          outcome = 'LOSS';
-          targetHit = 'SL';
-          closedPrice = s.stopLoss;
-          hitEventLabel = 'SL';
-        }
-      } else if (s.direction === 'SHORT') {
-        // 1. Highest Target: TP3 Hit -> Signal closed with MAXIMUM WIN!
-        if (livePrice <= s.tp3) {
-          outcome = 'WIN';
-          targetHit = 'TP3';
-          tp1Hit = true;
-          tp2Hit = true;
-          tp3Hit = true;
-          closedPrice = s.tp3;
-          hitEventLabel = 'TP3';
-        }
-        // 2. TP2 Already Hit:
-        // For Short, if market rises back above TP2 price -> Closed with WIN at TP2!
-        else if (s.tp2Hit) {
-          if (livePrice > s.tp2) {
-            // Market bounced back above TP2 -> Closed with WIN at TP2!
+      }
+
+      // 2. Direct livePrice check against TakeProfit and StopLoss
+      if (!outcome && livePrice && livePrice > 0) {
+        if (isLong) {
+          if (livePrice >= tpTarget) {
             outcome = 'WIN';
-            targetHit = 'TP2';
+            targetHit = livePrice >= s.tp3 ? 'TP3' : 'TP2';
             tp1Hit = true;
             tp2Hit = true;
-            closedPrice = s.tp2;
-            hitEventLabel = 'TP2_PULLBACK_WIN';
-          } else {
-            // Still below TP2, hunting for TP3 runner!
+            tp3Hit = livePrice >= s.tp3;
+            closedPrice = tpTarget;
+            closedTime = new Date().toISOString();
+            hitEventLabel = targetHit;
+          } else if (livePrice <= slTarget) {
+            outcome = 'LOSS';
+            targetHit = 'SL';
+            closedPrice = slTarget;
+            closedTime = new Date().toISOString();
+            hitEventLabel = 'SL';
+          } else if (livePrice >= s.tp1 && !tp1Hit) {
             tp1Hit = true;
-            tp2Hit = true;
-            targetHit = 'TP2';
+            targetHit = 'TP1';
+            hitEventLabel = 'TP1';
           }
-        }
-        // 3. First time hitting TP2:
-        else if (livePrice <= s.tp2) {
-          tp1Hit = true;
-          tp2Hit = true;
-          targetHit = 'TP2';
-          hitEventLabel = 'TP2';
-          // Signal stays OPEN hunting for TP3 runner!
-        }
-        // 4. First time hitting TP1:
-        else if (livePrice <= s.tp1 && !tp1Hit) {
-          tp1Hit = true;
-          targetHit = 'TP1';
-          hitEventLabel = 'TP1';
-          // Signal stays OPEN running towards TP2!
-        }
-        // 5. If TP1 was hit and price bounces to entry/above:
-        else if (tp1Hit && livePrice >= s.entry) {
-          outcome = 'WIN';
-          targetHit = 'TP1';
-          closedPrice = s.tp1;
-          hitEventLabel = 'TP1_SECURED';
-        }
-        // 6. Stop Loss hit without hitting any TP:
-        else if (!tp1Hit && livePrice >= s.stopLoss) {
-          outcome = 'LOSS';
-          targetHit = 'SL';
-          closedPrice = s.stopLoss;
-          hitEventLabel = 'SL';
+        } else {
+          if (livePrice <= tpTarget) {
+            outcome = 'WIN';
+            targetHit = livePrice <= s.tp3 ? 'TP3' : 'TP2';
+            tp1Hit = true;
+            tp2Hit = true;
+            tp3Hit = livePrice <= s.tp3;
+            closedPrice = tpTarget;
+            closedTime = new Date().toISOString();
+            hitEventLabel = targetHit;
+          } else if (livePrice >= slTarget) {
+            outcome = 'LOSS';
+            targetHit = 'SL';
+            closedPrice = slTarget;
+            closedTime = new Date().toISOString();
+            hitEventLabel = 'SL';
+          } else if (livePrice <= s.tp1 && !tp1Hit) {
+            tp1Hit = true;
+            targetHit = 'TP1';
+            hitEventLabel = 'TP1';
+          }
         }
       }
 
@@ -813,8 +842,8 @@ export default function App() {
           tp1Hit,
           tp2Hit,
           tp3Hit,
-          closedPrice: closedPrice || livePrice,
-          closedTime: outcome !== null ? new Date().toISOString() : s.closedTime
+          closedPrice: closedPrice || livePrice || s.entry,
+          closedTime: outcome !== null ? (closedTime || new Date().toISOString()) : s.closedTime
         };
         return { sig: updatedSig, isNewlyResolved, isHitEvent, hitEventLabel };
       }
@@ -827,7 +856,8 @@ export default function App() {
         const { sig, isNewlyResolved, isHitEvent, hitEventLabel } = processSignal(s);
         if (sig !== s) {
           anyChanged = true;
-          if (isNewlyResolved && sig.sheetRow && sig.sheetRow > 0) {
+          if (isNewlyResolved && sig.sheetRow && sig.sheetRow > 0 && !resolvingRowsRef.current.has(sig.sheetRow)) {
+            resolvingRowsRef.current.add(sig.sheetRow);
             callBackend('update_outcome', {
               row: sig.sheetRow,
               outcome: sig.outcome,
@@ -848,11 +878,9 @@ export default function App() {
                 'error'
               );
             }
-          } else if (isHitEvent) {
+          } else if (isHitEvent && !isNewlyResolved) {
             if (hitEventLabel === 'TP1') {
-              showToast(`🎯 ${sig.symbol} TP1 Hit! Signal runner active for TP2 (TP1+ tally updated).`, 'success');
-            } else if (hitEventLabel === 'TP2') {
-              showToast(`🚀 ${sig.symbol} TP2 Hit! Trailing profit locked at TP2. Hunting for TP3 runner...`, 'success');
+              showToast(`🎯 ${sig.symbol} TP1 Hit! Signal runner active for main Take Profit.`, 'success');
             }
           }
         }
@@ -883,11 +911,27 @@ export default function App() {
     });
   }, [callBackend, fetchSheetAccuracy]);
 
-  const fetchMarketTickers = useCallback(async () => {
+  const fetchMarketTickers = useCallback(async (extraSignals?: TradingSignal[] | any) => {
     try {
-      const supportedSet = new Set(SUPPORTED_COINS.map(c => c.symbol));
       const priceMap: Record<string, number> = {};
       const changeMap: Record<string, number> = {};
+
+      // Collect all open trade symbols from localStorage & extraSignals so even non-SUPPORTED_COINS (e.g. SHIBUSDT) are tracked
+      const openSymbolsSet = new Set<string>();
+      if (Array.isArray(extraSignals)) {
+        for (const s of extraSignals) {
+          if (s && !s.resolved && s.symbol) openSymbolsSet.add(s.symbol);
+        }
+      }
+      try {
+        const rawG = localStorage.getItem(KEYS.JOURNAL_GLOBAL);
+        if (rawG) {
+          const parsedG: TradingSignal[] = JSON.parse(rawG);
+          for (const s of parsedG) {
+            if (!s.resolved && s.symbol) openSymbolsSet.add(s.symbol);
+          }
+        }
+      } catch {}
 
       // Direct public endpoints (No local /api proxy needed, works everywhere!)
       const endpoints = [
@@ -912,22 +956,149 @@ export default function App() {
 
       if (allTickers) {
         for (const item of allTickers) {
-          if (supportedSet.has(item.symbol) && item.lastPrice) {
-            priceMap[item.symbol] = parseFloat(item.lastPrice);
-            changeMap[item.symbol] = parseFloat(item.priceChangePercent || '0');
+          if (item.symbol && item.lastPrice) {
+            const p = parseFloat(item.lastPrice);
+            if (p > 0) {
+              priceMap[item.symbol] = p;
+              changeMap[item.symbol] = parseFloat(item.priceChangePercent || '0');
+            }
           }
         }
       }
 
-      if (Object.keys(priceMap).length > 0) {
+      // If any open signal symbol (like SHIBUSDT on Spot) is missing from priceMap, fetch its spot price directly
+      for (const sym of openSymbolsSet) {
+        if (!priceMap[sym]) {
+          const spotUrls = [
+            `https://data-api.binance.vision/api/v3/ticker/price?symbol=${sym}`,
+            `https://api.binance.com/api/v3/ticker/price?symbol=${sym}`
+          ];
+          for (const sUrl of spotUrls) {
+            try {
+              const r = await fetch(sUrl);
+              if (r.ok) {
+                const d = await r.json();
+                if (d && d.price) {
+                  priceMap[sym] = parseFloat(d.price);
+                  break;
+                }
+              }
+            } catch {}
+          }
+        }
+      }
+
+      // Fetch recent 1h candles (high/low) for all open trade symbols to catch TP/SL hits that occurred in between
+      const klinesMap: Record<string, any[][]> = {};
+      if (openSymbolsSet.size > 0) {
+        await Promise.all(
+          Array.from(openSymbolsSet).map(async sym => {
+            const klines = await fetchKlinesForSymbol(sym, '1h', 200);
+            if (klines.length > 0) {
+              klinesMap[sym] = klines;
+            }
+          })
+        );
+      }
+
+      if (Object.keys(priceMap).length > 0 || Object.keys(klinesMap).length > 0) {
         setMarketPrices(prev => ({ ...prev, ...priceMap }));
         setMarketChanges(prev => ({ ...prev, ...changeMap }));
-        evaluateActiveSignalsLive(priceMap);
+        evaluateActiveSignalsLive(priceMap, klinesMap);
       }
     } catch (e) {
       console.warn('Market tickers fetch error:', e);
     }
-  }, [evaluateActiveSignalsLive]);
+  }, [evaluateActiveSignalsLive, fetchKlinesForSymbol]);
+
+  // -------------------------------------------------------------
+  // FETCH OPEN SIGNALS FROM GOOGLE SHEET & MERGE INTO JOURNAL
+  // -------------------------------------------------------------
+  const fetchOpenSignalsFromSheet = useCallback(async () => {
+    try {
+      const res = await callBackend('get_open_signals');
+      if (res && !res.error && Array.isArray(res.signals)) {
+        const sheetOpenSignals: TradingSignal[] = res.signals
+          .filter((raw: any) => raw && raw.symbol && (raw.direction === 'LONG' || raw.direction === 'SHORT'))
+          .map((raw: any) => {
+            const rowNum = Number(raw.row || raw.sheetRow || 0);
+            const parsedTs = typeof raw.timestamp === 'number'
+              ? raw.timestamp
+              : (Date.parse(raw.timestamp) || Date.now());
+            const baseSig: TradingSignal = {
+              id: raw.id || (rowNum > 0 ? `SHEET-ROW-${rowNum}` : `SIG-${parsedTs}-${raw.symbol}`),
+              symbol: String(raw.symbol).toUpperCase().trim(),
+              timeframe: raw.timeframe || '1h',
+              direction: raw.direction,
+              signalDirection: raw.direction,
+              entryStatus: 'READY',
+              currentPrice: Number(raw.entry) || 0,
+              entry: Number(raw.entry) || 0,
+              stopLoss: Number(raw.stopLoss) || 0,
+              takeProfit: Number(raw.takeProfit) || 0,
+              tp1: Number(raw.tp1) || 0,
+              tp2: Number(raw.takeProfit) || 0,
+              tp3: Number(raw.tp3) || 0,
+              tp1Hit: false,
+              tp2Hit: false,
+              tp3Hit: false,
+              targetHit: 'OPEN',
+              rr: raw.rr || '1:2.0',
+              confidence: Number(raw.confidence) || 75,
+              signalQuality: 'STRONG',
+              model: raw.model || 'Google-Sheet-Live',
+              timestamp: parsedTs,
+              resolved: false,
+              outcome: 'OPEN',
+              userId: raw.userId || 'global',
+              reasoning: raw.reasoning || 'Synced open signal from Google Sheet Journal.',
+              sheetRow: rowNum
+            };
+            return normalizeSignalTargets(baseSig);
+          });
+
+        setGlobalJournal(prev => {
+          const existingByRow = new Map<number, TradingSignal>();
+          const existingById = new Map<string, TradingSignal>();
+          for (const item of prev) {
+            if (item.sheetRow && item.sheetRow > 0) existingByRow.set(item.sheetRow, item);
+            existingById.set(item.id, item);
+          }
+
+          const mergedList = [...prev];
+          for (const sheetSig of sheetOpenSignals) {
+            const match = (sheetSig.sheetRow && existingByRow.get(sheetSig.sheetRow)) || existingById.get(sheetSig.id);
+            if (!match) {
+              mergedList.push(sheetSig);
+            } else if (!match.resolved) {
+              // Ensure sheetRow and targets stay synced
+              const idx = mergedList.findIndex(x => x.id === match.id);
+              if (idx !== -1) {
+                mergedList[idx] = normalizeSignalTargets({
+                  ...match,
+                  sheetRow: sheetSig.sheetRow || match.sheetRow,
+                  entry: sheetSig.entry || match.entry,
+                  stopLoss: sheetSig.stopLoss || match.stopLoss,
+                  takeProfit: sheetSig.takeProfit || match.takeProfit,
+                  timestamp: sheetSig.timestamp || match.timestamp
+                });
+              }
+            }
+          }
+
+          mergedList.sort((a, b) => b.timestamp - a.timestamp);
+          localStorage.setItem(KEYS.JOURNAL_GLOBAL, JSON.stringify(mergedList));
+          return mergedList;
+        });
+
+        if (sheetOpenSignals.length > 0) {
+          fetchMarketTickers(sheetOpenSignals);
+        }
+      }
+    } catch (e) {
+      console.warn('[OpenSignals] Failed to fetch open signals from Google Sheet:', e);
+    }
+  }, [callBackend, fetchMarketTickers]);
 
   // -------------------------------------------------------------
   // REAL SYNC INITIALIZATION SEQUENCE (FAST BOOT - NO STUCK)
@@ -950,14 +1121,16 @@ export default function App() {
     }, 400);
 
     loadJournals();
+    fetchOpenSignalsFromSheet();
     fetchMarketTickers();
     fetchSheetAccuracy();
     fetchGlobalAdConfig();
 
-    // Re-sync Global Settings from Google Sheet when app returns from background to foreground
+    // Re-sync Global Settings & Open Signals from Google Sheet when app returns from background to foreground
     const handleAppForeground = () => {
       if (document.visibilityState === 'visible') {
         fetchGlobalAdConfig();
+        fetchOpenSignalsFromSheet();
       }
     };
     document.addEventListener('visibilitychange', handleAppForeground);
@@ -986,7 +1159,7 @@ export default function App() {
       })();
     }
 
-    const interval = setInterval(fetchMarketTickers, 10000);
+    const interval = setInterval(() => fetchMarketTickers(), 10000);
 
     return () => {
       isMounted = false;
@@ -995,7 +1168,7 @@ export default function App() {
       document.removeEventListener('visibilitychange', handleAppForeground);
       window.removeEventListener('focus', handleAppForeground);
     };
-  }, [fetchMarketTickers, fetchSheetAccuracy, fetchGlobalAdConfig, adConfig.appOpenAdUnitId]);
+  }, [fetchMarketTickers, fetchOpenSignalsFromSheet, fetchSheetAccuracy, fetchGlobalAdConfig, adConfig.appOpenAdUnitId]);
 
   // Sync with Google Sheet when user changes/logs in
   useEffect(() => {

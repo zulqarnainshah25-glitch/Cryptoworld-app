@@ -223,3 +223,157 @@ describe('6. Quota Synchronization (Zero Quota Handling)', () => {
   });
 });
 
+describe('7. Google Sheet Open Trades Evaluation (Live Price + Candle High/Low)', () => {
+  const evaluateOpenTrade = (
+    signal: {
+      symbol: string;
+      direction: 'LONG' | 'SHORT';
+      entry: number;
+      stopLoss: number;
+      takeProfit: number;
+      timestamp: number;
+      resolved?: boolean;
+    },
+    livePrice?: number,
+    klines?: any[][]
+  ) => {
+    if (signal.resolved) return { resolved: true, outcome: null, targetHit: 'OPEN' };
+    const isLong = signal.direction === 'LONG';
+    let outcome: 'WIN' | 'LOSS' | null = null;
+    let targetHit = 'OPEN';
+    let closedPrice = signal.entry;
+
+    // 1. Check historical candles after signal timestamp
+    if (Array.isArray(klines) && klines.length > 0) {
+      for (const k of klines) {
+        const openTime = Number(k[0]);
+        const high = parseFloat(k[2]);
+        const low = parseFloat(k[3]);
+        if (openTime < signal.timestamp) continue;
+        if (isLong) {
+          if (high >= signal.takeProfit) {
+            outcome = 'WIN';
+            targetHit = 'TP2';
+            closedPrice = signal.takeProfit;
+            break;
+          }
+          if (low <= signal.stopLoss) {
+            outcome = 'LOSS';
+            targetHit = 'SL';
+            closedPrice = signal.stopLoss;
+            break;
+          }
+        } else {
+          if (low <= signal.takeProfit) {
+            outcome = 'WIN';
+            targetHit = 'TP2';
+            closedPrice = signal.takeProfit;
+            break;
+          }
+          if (high >= signal.stopLoss) {
+            outcome = 'LOSS';
+            targetHit = 'SL';
+            closedPrice = signal.stopLoss;
+            break;
+          }
+        }
+      }
+    }
+
+    // 2. Check livePrice directly against takeProfit and stopLoss
+    if (!outcome && livePrice && livePrice > 0) {
+      if (isLong) {
+        if (livePrice >= signal.takeProfit) {
+          outcome = 'WIN';
+          targetHit = 'TP2';
+          closedPrice = signal.takeProfit;
+        } else if (livePrice <= signal.stopLoss) {
+          outcome = 'LOSS';
+          targetHit = 'SL';
+          closedPrice = signal.stopLoss;
+        }
+      } else {
+        if (livePrice <= signal.takeProfit) {
+          outcome = 'WIN';
+          targetHit = 'TP2';
+          closedPrice = signal.takeProfit;
+        } else if (livePrice >= signal.stopLoss) {
+          outcome = 'LOSS';
+          targetHit = 'SL';
+          closedPrice = signal.stopLoss;
+        }
+      }
+    }
+
+    return {
+      resolved: outcome !== null,
+      outcome,
+      targetHit,
+      closedPrice
+    };
+  };
+
+  it('should immediately resolve LONG trade as WIN when livePrice crosses takeProfit', () => {
+    const res = evaluateOpenTrade(
+      {
+        symbol: 'BTCUSDT',
+        direction: 'LONG',
+        entry: 79797.4,
+        stopLoss: 79508.2,
+        takeProfit: 80520.38,
+        timestamp: 1700000000000
+      },
+      80600
+    );
+    expect(res.resolved).toBe(true);
+    expect(res.outcome).toBe('WIN');
+    expect(res.targetHit).toBe('TP2');
+    expect(res.closedPrice).toBe(80520.38);
+  });
+
+  it('should immediately resolve SHORT trade as LOSS when livePrice crosses stopLoss', () => {
+    const res = evaluateOpenTrade(
+      {
+        symbol: 'BTCUSDT',
+        direction: 'SHORT',
+        entry: 80152.3,
+        stopLoss: 80655.95,
+        takeProfit: 79239.04,
+        timestamp: 1700000000000
+      },
+      80700
+    );
+    expect(res.resolved).toBe(true);
+    expect(res.outcome).toBe('LOSS');
+    expect(res.targetHit).toBe('SL');
+    expect(res.closedPrice).toBe(80655.95);
+  });
+
+  it('should detect TP/SL hit from historical candle High/Low even if livePrice pulled back to entry', () => {
+    const sigTime = 1700000000000;
+    const klines = [
+      // Candle BEFORE signal (should be ignored even though low was 0.00000480)
+      [sigTime - 3600000, '0.00000500', '0.00000505', '0.00000480', '0.00000500', '100', sigTime - 1],
+      // Candle AFTER signal where high hit TP (0.00000515 >= 0.000005125)
+      [sigTime + 1000, '0.00000500', '0.00000515', '0.00000499', '0.00000502', '100', sigTime + 3600000]
+    ];
+
+    const res = evaluateOpenTrade(
+      {
+        symbol: 'SHIBUSDT',
+        direction: 'LONG',
+        entry: 0.000005,
+        stopLoss: 0.00000495,
+        takeProfit: 0.000005125,
+        timestamp: sigTime
+      },
+      0.00000501, // Current livePrice pulled back near entry
+      klines
+    );
+    expect(res.resolved).toBe(true);
+    expect(res.outcome).toBe('WIN');
+    expect(res.closedPrice).toBe(0.000005125);
+  });
+});
+
+
