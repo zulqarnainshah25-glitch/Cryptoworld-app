@@ -44,6 +44,11 @@ export default defineConfig(() => {
             },
           ],
         },
+        workbox: {
+          skipWaiting: true,
+          clientsClaim: true,
+          cleanupOutdatedCaches: true,
+        },
         devOptions: {
           enabled: true,
           type: 'module',
@@ -213,7 +218,6 @@ Return ONLY valid JSON matching this exact structure:
 
           // Google Apps Script Backend Status Route
           const GAS_WEBAPP_URL = 'https://script.google.com/macros/s/AKfycbzxKNv2JGtgAbLohzkvTwN5it7Xl3iKSKb6RK228k7JQxUnl-OPPKaXrjq5v-eaj9XrPQ/exec';
-          const SHEET_ID = '1g_fTETKOMsgQOS8j2Bj8jLk5veeBir5xfFcyF0CrRkI';
 
           server.middlewares.use('/api/backend-status', async (req, res) => {
             try {
@@ -222,10 +226,7 @@ Return ONLY valid JSON matching this exact structure:
               res.setHeader('Content-Type', 'application/json');
               res.end(JSON.stringify({
                 ...data,
-                sheetId: SHEET_ID,
-                sheetUrl: `https://docs.google.com/spreadsheets/d/${SHEET_ID}/edit`,
-                gasUrl: GAS_WEBAPP_URL,
-                adminKey: 'Admin@zulqarnain.1'
+                gasUrl: GAS_WEBAPP_URL
               }));
             } catch (err: any) {
               res.setHeader('Content-Type', 'application/json');
@@ -233,10 +234,7 @@ Return ONLY valid JSON matching this exact structure:
                 success: true,
                 service: 'CryptoWorld V6 (Groq + Gemini)',
                 status: 'online',
-                sheetId: SHEET_ID,
-                sheetUrl: `https://docs.google.com/spreadsheets/d/${SHEET_ID}/edit`,
                 gasUrl: GAS_WEBAPP_URL,
-                adminKey: 'Admin@zulqarnain.1',
                 fallback: true
               }));
             }

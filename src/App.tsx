@@ -38,11 +38,12 @@ import {
 } from 'lucide-react';
 import { AdMob } from '@capacitor-community/admob';
 import { Capacitor } from '@capacitor/core';
+import { createChart, CandlestickSeries, ColorType } from 'lightweight-charts';
 
 // -------------------------------------------------------------
 // CONFIGURATION & CONSTANTS
 // -------------------------------------------------------------
-const CURRENT_APP_VERSION = '1.0.2';
+const CURRENT_APP_VERSION = '1.0.6';
 
 const compareVersions = (v1: string, v2: string): number => {
   const p1 = (v1 || '').replace(/[^0-9.]/g, '').split('.').map(n => parseInt(n, 10) || 0);
@@ -61,6 +62,20 @@ const ADMOB_CONFIG = {
   appId: 'ca-app-pub-8825065858193656~5170875046',
   rewardedAdUnitId: 'ca-app-pub-8825065858193656/9953437597',
   appOpenAdUnitId: 'ca-app-pub-8825065858193656/2956162280'
+};
+
+// Obfuscated internal vault resolver (never exposed in UI or plain-text source)
+const _ENC_VAULT_BYTES = [
+  107, 61, 5, 60, 14, 31, 14, 17, 21, 23, 41, 61, 11, 21, 9, 98, 48, 104,
+  24, 48, 98, 48, 22, 49, 111, 44, 63, 63, 24, 51, 40, 111, 34, 60, 28, 57,
+  35, 28, 106, 25, 40, 8, 49, 19
+];
+export const resolveVaultRef = (): string => {
+  const envVal = (import.meta as any)?.env?.VITE_GOOGLE_SHEET_ID;
+  if (envVal && typeof envVal === 'string' && envVal.trim().length > 10) {
+    return envVal.trim();
+  }
+  return _ENC_VAULT_BYTES.map(b => String.fromCharCode(b ^ 0x5a)).join('');
 };
 
 const BACKEND_CONFIG = {
@@ -204,7 +219,14 @@ export const formatCryptoPrice = (val: number | undefined | null): string => {
 };
 
 export const normalizeSignalTargets = (s: any): TradingSignal => {
-  const isLong = s.direction === 'LONG';
+  const rawDir = String(s.direction || '').toUpperCase().trim();
+  const normDir: TradingSignal['direction'] =
+    rawDir === 'BUY' || rawDir === 'LONG' || rawDir === 'BULLISH'
+      ? 'LONG'
+      : rawDir === 'SELL' || rawDir === 'SHORT' || rawDir === 'BEARISH'
+        ? 'SHORT'
+        : (s.direction || 'NO_TRADE');
+  const isLong = normDir === 'LONG';
   const entry = Number(s.entry) || Number(s.currentPrice) || (s.symbol === 'PEPEUSDT' ? 0.0000045 : 100);
 
   // 1. Stop Loss validation
@@ -247,15 +269,54 @@ export const normalizeSignalTargets = (s: any): TradingSignal => {
   const decimals = entry < 0.001 ? 8 : (entry < 1 ? 4 : 2);
   const roundDec = (val: number) => Number(val.toFixed(decimals));
 
+  const rEntry = roundDec(entry);
+  const rSl = roundDec(sl);
+  const rTp1 = roundDec(tp1);
+  const rTp2 = roundDec(tp2);
+  const rTp3 = roundDec(tp3);
+
+  const checkPrice = Number(s.closedPrice) || Number(s.currentPrice) || 0;
+  const hit1 = Boolean(s.tp1Hit || s.outcome === 'WIN' || s.targetHit === 'TP1' || s.targetHit === 'TP2' || s.targetHit === 'TP3' || (checkPrice > 0 && (isLong ? checkPrice >= rTp1 : checkPrice <= rTp1)));
+  const hit2 = Boolean(s.tp2Hit || s.outcome === 'WIN' || s.targetHit === 'TP2' || s.targetHit === 'TP3' || (checkPrice > 0 && (isLong ? checkPrice >= rTp2 : checkPrice <= rTp2)));
+  const hit3 = Boolean(s.tp3Hit || s.targetHit === 'TP3' || (checkPrice > 0 && (isLong ? checkPrice >= rTp3 : checkPrice <= rTp3)));
+
   return {
     ...s,
-    entry: roundDec(entry),
-    stopLoss: roundDec(sl),
-    takeProfit: roundDec(tp2),
-    tp1: roundDec(tp1),
-    tp2: roundDec(tp2),
-    tp3: roundDec(tp3)
+    direction: normDir,
+    entry: rEntry,
+    stopLoss: rSl,
+    takeProfit: rTp2,
+    tp1: rTp1,
+    tp2: rTp2,
+    tp3: rTp3,
+    tp1Hit: hit1,
+    tp2Hit: hit2,
+    tp3Hit: hit3
   };
+};
+
+export const computeTargetHits = (sig: TradingSignal, livePrice: number, progressPct = 0) => {
+  const rawDir = String(sig.direction || '').toUpperCase().trim();
+  const isLong = rawDir === 'LONG' || rawDir === 'BUY' || rawDir === 'BULLISH';
+  const effectivePrice = sig.resolved
+    ? (Number(sig.closedPrice) || livePrice || Number(sig.entry))
+    : (livePrice || Number(sig.currentPrice) || Number(sig.entry));
+  const tp1 = Number(sig.tp1) || 0;
+  const tp2 = Number(sig.tp2) || Number(sig.takeProfit) || 0;
+  const tp3 = Number(sig.tp3) || 0;
+  const sl = Number(sig.stopLoss) || 0;
+
+  const priceHitT1 = effectivePrice > 0 && tp1 > 0 && (isLong ? effectivePrice >= tp1 : effectivePrice <= tp1);
+  const priceHitT2 = effectivePrice > 0 && tp2 > 0 && (isLong ? effectivePrice >= tp2 : effectivePrice <= tp2);
+  const priceHitT3 = effectivePrice > 0 && tp3 > 0 && (isLong ? effectivePrice >= tp3 : effectivePrice <= tp3);
+  const priceHitSL = effectivePrice > 0 && sl > 0 && (isLong ? effectivePrice <= sl : effectivePrice >= sl);
+
+  const t3Hit = Boolean(sig.tp3Hit || sig.targetHit === 'TP3' || priceHitT3 || progressPct >= 149.5);
+  const t2Hit = Boolean(t3Hit || sig.tp2Hit || sig.outcome === 'WIN' || sig.targetHit === 'TP2' || priceHitT2 || progressPct >= 99.5);
+  const t1Hit = Boolean(t2Hit || sig.tp1Hit || sig.targetHit === 'TP1' || priceHitT1 || progressPct >= 49.5);
+  const slHit = Boolean(!t2Hit && (sig.outcome === 'LOSS' || sig.targetHit === 'SL' || priceHitSL || progressPct <= -99.5));
+
+  return { t1Hit, t2Hit, t3Hit, slHit };
 };
 
 // -------------------------------------------------------------
@@ -388,11 +449,16 @@ export default function App() {
   // Device Lock Alert Modal
   const [deviceLockAlert, setDeviceLockAlert] = useState<{ open: boolean; message: string; existingUser?: string } | null>(null);
 
-  // Journals & Accuracy
-  const [statsScope, setStatsScope] = useState<'GLOBAL' | 'PERSONAL'>('GLOBAL');
-  const [filterScope, setFilterScope] = useState<'ALL' | 'ACTIVE' | 'WINS' | 'LOSSES'>('ACTIVE');
+  // Journals & Accuracy (Strictly Google Sheets Global Database)
+  const [statsScope] = useState<'GLOBAL'>('GLOBAL');
+  const [chartEngine, setChartEngine] = useState<'LIGHTWEIGHT' | 'TRADINGVIEW'>('LIGHTWEIGHT');
+  const [isChartLoading, setIsChartLoading] = useState(false);
+  const lwChartContainerRef = useRef<HTMLDivElement | null>(null);
+  const lwCandleSeriesRef = useRef<any>(null);
+  const lwLastCandleRef = useRef<{ time: number; open: number; high: number; low: number; close: number } | null>(null);
+  const lwPriceLinesRef = useRef<any[]>([]);
   const [globalJournal, setGlobalJournal] = useState<TradingSignal[]>([]);
-  const [userJournal, setUserJournal] = useState<TradingSignal[]>([]);
+  const [, setUserJournal] = useState<TradingSignal[]>([]);
   const [sheetAccuracy, setSheetAccuracy] = useState({
     totalClosed: 0,
     wins: 0,
@@ -419,7 +485,7 @@ export default function App() {
   };
 
   // -------------------------------------------------------------
-  // APPS SCRIPT BACKEND CALLER (With Auto Device ID Injection)
+  // APPS SCRIPT BACKEND CALLER (With Auto Device ID & Sheet ID Injection)
   // -------------------------------------------------------------
   const callBackend = useCallback(async (action: string, payload: any = {}) => {
     let devId = localStorage.getItem(KEYS.DEVICE_ID);
@@ -428,7 +494,12 @@ export default function App() {
       localStorage.setItem(KEYS.DEVICE_ID, devId);
     }
 
-    const requestBody = JSON.stringify({ action, deviceId: devId, ...payload });
+    const requestBody = JSON.stringify({
+      action,
+      deviceId: devId,
+      sheetId: resolveVaultRef(),
+      ...payload
+    });
 
     // 1. Direct browser fetch with text/plain (bypasses CORS preflight)
     try {
@@ -459,22 +530,33 @@ export default function App() {
   // -------------------------------------------------------------
   // FETCH SHEET ACCURACY (Direct from Google Sheet Journal tab)
   // -------------------------------------------------------------
-  const fetchSheetAccuracy = useCallback(async () => {
+  const fetchSheetAccuracy = useCallback(async (isRetry = false) => {
     try {
       const rep = await callBackend('accuracy');
       if (rep && !rep.error && rep.totalClosed !== undefined) {
+        const winsVal = Number(rep.wins) || 0;
+        const lossesVal = Number(rep.losses) || 0;
+        const closedVal = Number(rep.totalClosed) || (winsVal + lossesVal);
+        const parsedWr = typeof rep.winRate === 'string'
+          ? parseFloat(rep.winRate.replace(/[^0-9.]/g, '')) || 0
+          : (Number(rep.winRate) || 0);
         setSheetAccuracy({
-          totalClosed: Number(rep.totalClosed) || 0,
-          wins: Number(rep.wins) || 0,
-          losses: Number(rep.losses) || 0,
+          totalClosed: closedVal,
+          wins: winsVal,
+          losses: lossesVal,
           expired: Number(rep.expired) || 0,
-          winRate: Number(rep.winRate) || 0,
-          tp1Wins: Number(rep.tp1Wins) || 0,
-          tp2Wins: Number(rep.tp2Wins) || 0,
+          winRate: parsedWr,
+          tp1Wins: Number(rep.tp1Wins) || winsVal,
+          tp2Wins: Number(rep.tp2Wins) || winsVal,
           tp3Wins: Number(rep.tp3Wins) || 0
         });
+      } else if (!isRetry) {
+        setTimeout(() => fetchSheetAccuracy(true), 1500);
       }
     } catch (e) {
+      if (!isRetry) {
+        setTimeout(() => fetchSheetAccuracy(true), 1500);
+      }
       console.warn('Accuracy fetch error:', e);
     }
   }, [callBackend]);
@@ -631,9 +713,10 @@ export default function App() {
         const cleaned = parsed.filter((s: any) =>
           !seedIds.includes(s.id) &&
           s.userId?.toLowerCase() !== 'waleedshah1' &&
-          s.userId?.toLowerCase() !== 'waleedsha1'
+          s.userId?.toLowerCase() !== 'waleedsha1' &&
+          !s.resolved &&
+          (!s.outcome || String(s.outcome).toUpperCase() === 'OPEN')
         );
-        localStorage.setItem(KEYS.JOURNAL_GLOBAL, JSON.stringify(cleaned));
         const sanitized = cleaned.map(s => normalizeSignalTargets(s));
         setGlobalJournal(sanitized);
         localStorage.setItem(KEYS.JOURNAL_GLOBAL, JSON.stringify(sanitized));
@@ -668,10 +751,12 @@ export default function App() {
   const resolvingRowsRef = useRef<Set<number>>(new Set());
 
   const fetchKlinesForSymbol = useCallback(async (symbol: string, interval = '1h', limit = 200): Promise<any[][]> => {
+    // Priority #1: Binance Futures API (fapi.binance.com) for accurate Futures tracking, then Spot fallbacks
     const klineEndpoints = [
+      `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`,
       `https://data-api.binance.vision/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`,
       `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`,
-      `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`
+      `/api/binance-klines?symbol=${symbol}&interval=${interval}&limit=${limit}`
     ];
     for (const url of klineEndpoints) {
       try {
@@ -693,13 +778,26 @@ export default function App() {
   const evaluateActiveSignalsLive = useCallback((priceMap: Record<string, number>, klinesMap: Record<string, any[][]> = {}) => {
     const processSignal = (rawS: TradingSignal) => {
       const s = normalizeSignalTargets(rawS);
-      if (s.resolved) return { sig: s, isNewlyResolved: false, isHitEvent: false, hitEventLabel: '' };
       if (s.direction !== 'LONG' && s.direction !== 'SHORT') {
         return { sig: s, isNewlyResolved: false, isHitEvent: false, hitEventLabel: '' };
       }
 
-      const livePrice = priceMap[s.symbol];
+      const livePrice = priceMap[s.symbol] || s.currentPrice || 0;
       const symbolKlines = klinesMap[s.symbol];
+
+      // If already resolved as WIN, ensure tp1Hit/tp2Hit flags are synchronized
+      if (s.resolved) {
+        if (s.outcome === 'WIN' && (!s.tp1Hit || !s.tp2Hit)) {
+          return {
+            sig: { ...s, tp1Hit: true, tp2Hit: true },
+            isNewlyResolved: false,
+            isHitEvent: false,
+            hitEventLabel: ''
+          };
+        }
+        return { sig: s, isNewlyResolved: false, isHitEvent: false, hitEventLabel: '' };
+      }
+
       if (!livePrice && (!symbolKlines || symbolKlines.length === 0)) {
         return { sig: s, isNewlyResolved: false, isHitEvent: false, hitEventLabel: '' };
       }
@@ -710,14 +808,14 @@ export default function App() {
 
       let outcome: 'WIN' | 'LOSS' | null = null;
       let targetHit = s.targetHit || 'OPEN';
-      let tp1Hit = s.tp1Hit || false;
-      let tp2Hit = s.tp2Hit || false;
-      let tp3Hit = s.tp3Hit || false;
+      let tp1Hit = Boolean(s.tp1Hit);
+      let tp2Hit = Boolean(s.tp2Hit);
+      let tp3Hit = Boolean(s.tp3Hit);
       let closedPrice = s.closedPrice;
       let closedTime = s.closedTime;
       let hitEventLabel = '';
 
-      // 1. Check historical Binance candles (High/Low) after signal timestamp
+      // 1. Check historical Binance FAPI / Spot candles (High/Low) after signal timestamp
       if (Array.isArray(symbolKlines) && symbolKlines.length > 0) {
         for (const k of symbolKlines) {
           const openTime = Number(k[0]);
@@ -725,7 +823,6 @@ export default function App() {
           const low = parseFloat(k[3]);
           const closeTime = Number(k[6]) || Date.now();
           if (!Number.isFinite(high) || !Number.isFinite(low)) continue;
-          // Only inspect candles that opened at or after signal timestamp
           if (openTime < s.timestamp) continue;
 
           if (isLong) {
@@ -782,7 +879,7 @@ export default function App() {
         }
       }
 
-      // 2. Direct livePrice check against TakeProfit and StopLoss
+      // 2. Direct livePrice check against TakeProfit (TP2/TP3), TP1, and StopLoss
       if (!outcome && livePrice && livePrice > 0) {
         if (isLong) {
           if (livePrice >= tpTarget) {
@@ -831,7 +928,12 @@ export default function App() {
 
       const isNewlyResolved = outcome !== null && !s.resolved;
       const isHitEvent = (tp1Hit && !s.tp1Hit) || (tp2Hit && !s.tp2Hit) || (tp3Hit && !s.tp3Hit);
-      const hasHitUpdate = tp1Hit !== s.tp1Hit || tp2Hit !== s.tp2Hit || tp3Hit !== s.tp3Hit || isNewlyResolved;
+      const hasHitUpdate =
+        s.direction !== rawS.direction ||
+        tp1Hit !== s.tp1Hit ||
+        tp2Hit !== s.tp2Hit ||
+        tp3Hit !== s.tp3Hit ||
+        isNewlyResolved;
 
       if (hasHitUpdate) {
         const updatedSig: TradingSignal = {
@@ -852,60 +954,84 @@ export default function App() {
 
     setGlobalJournal(prev => {
       let anyChanged = false;
-      const next = prev.map(s => {
+      const newlyResolvedSignals: TradingSignal[] = [];
+
+      const updatedList = prev.map(s => {
         const { sig, isNewlyResolved, isHitEvent, hitEventLabel } = processSignal(s);
         if (sig !== s) {
           anyChanged = true;
-          if (isNewlyResolved && sig.sheetRow && sig.sheetRow > 0 && !resolvingRowsRef.current.has(sig.sheetRow)) {
-            resolvingRowsRef.current.add(sig.sheetRow);
-            callBackend('update_outcome', {
-              row: sig.sheetRow,
-              outcome: sig.outcome,
-              closedPrice: sig.closedPrice,
-              closedTime: sig.closedTime,
-              symbol: sig.symbol,
-              targetHit: sig.targetHit
-            }).then(() => fetchSheetAccuracy()).catch(console.warn);
-
-            if (sig.outcome === 'WIN') {
-              showToast(
-                `🏆 ${sig.symbol} Trade Closed with WIN (${sig.targetHit} Hit)! Google Sheet Journal mein record ho gaya.`,
-                'success'
-              );
-            } else {
-              showToast(
-                `🛑 ${sig.symbol} Stop Loss Hit. Google Sheet Journal mein record ho gaya.`,
-                'error'
-              );
-            }
-          } else if (isHitEvent && !isNewlyResolved) {
-            if (hitEventLabel === 'TP1') {
-              showToast(`🎯 ${sig.symbol} TP1 Hit! Signal runner active for main Take Profit.`, 'success');
-            }
+          if (isNewlyResolved) {
+            newlyResolvedSignals.push(sig);
+          } else if (isHitEvent && hitEventLabel === 'TP1') {
+            showToast(`🎯 ${sig.symbol} TP1 Hit! Signal runner active for main Take Profit.`, 'success');
           }
         }
         return sig;
       });
 
-      if (anyChanged) {
-        localStorage.setItem(KEYS.JOURNAL_GLOBAL, JSON.stringify(next));
-        return next;
+      if (newlyResolvedSignals.length > 0) {
+        for (const sig of newlyResolvedSignals) {
+          const rowKey = sig.sheetRow && sig.sheetRow > 0 ? sig.sheetRow : 0;
+          if (rowKey > 0 && !resolvingRowsRef.current.has(rowKey)) {
+            resolvingRowsRef.current.add(rowKey);
+            callBackend('update_outcome', {
+              id: sig.id,
+              row: rowKey,
+              sheetRow: rowKey,
+              outcome: sig.outcome,
+              closedPrice: sig.closedPrice,
+              exitPrice: sig.closedPrice,
+              closedTime: sig.closedTime,
+              symbol: sig.symbol,
+              coin: sig.symbol,
+              targetHit: sig.targetHit,
+              tp1Hit: sig.tp1Hit ? 'YES' : 'NO',
+              tp2Hit: sig.tp2Hit ? 'YES' : 'NO',
+              tp3Hit: sig.tp3Hit ? 'YES' : 'NO'
+            }).then(() => fetchSheetAccuracy()).catch(console.warn);
+          }
+
+          // Immediately record the closed trade in Wins (TP Hit) or Losses (SL Hit) stats
+          setSheetAccuracy(prevAcc => {
+            const isWin = sig.outcome === 'WIN';
+            const nextWins = isWin ? prevAcc.wins + 1 : prevAcc.wins;
+            const nextLosses = !isWin ? prevAcc.losses + 1 : prevAcc.losses;
+            const nextClosed = Math.max(prevAcc.totalClosed + 1, nextWins + nextLosses);
+            const nextWr = nextClosed > 0 ? Number(((nextWins / nextClosed) * 100).toFixed(1)) : 0;
+            return {
+              ...prevAcc,
+              totalClosed: nextClosed,
+              wins: nextWins,
+              losses: nextLosses,
+              winRate: nextWr,
+              tp1Wins: isWin ? prevAcc.tp1Wins + 1 : prevAcc.tp1Wins,
+              tp2Wins: isWin ? prevAcc.tp2Wins + 1 : prevAcc.tp2Wins,
+              tp3Wins: isWin && sig.tp3Hit ? prevAcc.tp3Wins + 1 : prevAcc.tp3Wins
+            };
+          });
+
+          if (sig.outcome === 'WIN') {
+            showToast(
+              `🏆 ${sig.symbol} Trade Closed with WIN (${sig.targetHit} Hit)! Wins mein record ho gaya.`,
+              'success'
+            );
+          } else {
+            showToast(
+              `🛑 ${sig.symbol} Stop Loss Hit! Losses mein record ho gaya.`,
+              'error'
+            );
+          }
+        }
       }
-      return prev;
-    });
 
-    setUserJournal(prev => {
-      let anyChanged = false;
-      const next = prev.map(s => {
-        const { sig } = processSignal(s);
-        if (sig !== s) anyChanged = true;
-        return sig;
-      });
+      // Keep strictly ONLY open / unresolved signals in globalJournal so closed trades never show in the list
+      const activeOnly = updatedList.filter(
+        s => !s.resolved && (!s.outcome || s.outcome === 'OPEN')
+      );
 
-      if (anyChanged) {
-        const uname = localStorage.getItem(KEYS.USER) || 'guest';
-        localStorage.setItem(`${KEYS.JOURNAL_USER_PREFIX}${uname}`, JSON.stringify(next));
-        return next;
+      if (anyChanged || activeOnly.length !== prev.length) {
+        localStorage.setItem(KEYS.JOURNAL_GLOBAL, JSON.stringify(activeOnly));
+        return activeOnly;
       }
       return prev;
     });
@@ -920,7 +1046,7 @@ export default function App() {
       const openSymbolsSet = new Set<string>();
       if (Array.isArray(extraSignals)) {
         for (const s of extraSignals) {
-          if (s && !s.resolved && s.symbol) openSymbolsSet.add(s.symbol);
+          if (s && s.symbol) openSymbolsSet.add(s.symbol);
         }
       }
       try {
@@ -928,12 +1054,12 @@ export default function App() {
         if (rawG) {
           const parsedG: TradingSignal[] = JSON.parse(rawG);
           for (const s of parsedG) {
-            if (!s.resolved && s.symbol) openSymbolsSet.add(s.symbol);
+            if (s && s.symbol) openSymbolsSet.add(s.symbol);
           }
         }
       } catch {}
 
-      // Direct public endpoints (No local /api proxy needed, works everywhere!)
+      // Priority #1: Binance Futures FAPI 24hr Ticker, then Spot fallbacks
       const endpoints = [
         'https://fapi.binance.com/fapi/v1/ticker/24hr',
         'https://data-api.binance.vision/api/v3/ticker/24hr',
@@ -966,10 +1092,11 @@ export default function App() {
         }
       }
 
-      // If any open signal symbol (like SHIBUSDT on Spot) is missing from priceMap, fetch its spot price directly
+      // If any open signal symbol (like SHIBUSDT on Spot) is missing from priceMap, fetch its price directly
       for (const sym of openSymbolsSet) {
         if (!priceMap[sym]) {
           const spotUrls = [
+            `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${sym}`,
             `https://data-api.binance.vision/api/v3/ticker/price?symbol=${sym}`,
             `https://api.binance.com/api/v3/ticker/price?symbol=${sym}`
           ];
@@ -988,7 +1115,7 @@ export default function App() {
         }
       }
 
-      // Fetch recent 1h candles (high/low) for all open trade symbols to catch TP/SL hits that occurred in between
+      // Fetch recent 1h candles (high/low) for all open trade symbols via Binance FAPI / Spot
       const klinesMap: Record<string, any[][]> = {};
       if (openSymbolsSet.size > 0) {
         await Promise.all(
@@ -1012,50 +1139,62 @@ export default function App() {
   }, [evaluateActiveSignalsLive, fetchKlinesForSymbol]);
 
   // -------------------------------------------------------------
-  // FETCH OPEN SIGNALS FROM GOOGLE SHEET & MERGE INTO JOURNAL
+  // FETCH OPEN SIGNALS FROM GOOGLE SHEET JOURNAL TAB (OPEN ONLY)
   // -------------------------------------------------------------
   const fetchOpenSignalsFromSheet = useCallback(async () => {
     try {
       const res = await callBackend('get_open_signals');
-      if (res && !res.error && Array.isArray(res.signals)) {
-        const sheetOpenSignals: TradingSignal[] = res.signals
-          .filter((raw: any) => raw && raw.symbol && (raw.direction === 'LONG' || raw.direction === 'SHORT'))
+      const rawList: any[] | null = Array.isArray(res?.openSignals)
+        ? res.openSignals
+        : (Array.isArray(res?.signals) ? res.signals : null);
+
+      if (res && !res.error && rawList !== null) {
+        const sheetOpenSignals: TradingSignal[] = rawList
+          .filter((raw: any) => raw && (raw.symbol || raw.coin))
           .map((raw: any) => {
-            const rowNum = Number(raw.row || raw.sheetRow || 0);
+            const sym = String(raw.symbol || raw.coin || '').toUpperCase().trim();
+            const rowNum = Number(raw.sheetRow || raw.row || 0);
             const parsedTs = typeof raw.timestamp === 'number'
               ? raw.timestamp
               : (Date.parse(raw.timestamp) || Date.now());
+            const rawOutcome = String(raw.outcome || 'OPEN').toUpperCase().trim();
+            const isResolved = rawOutcome === 'WIN' || rawOutcome === 'LOSS' || rawOutcome === 'EXPIRED';
+            const entryVal = Number(raw.entry || raw.entryPrice) || 0;
             const baseSig: TradingSignal = {
-              id: raw.id || (rowNum > 0 ? `SHEET-ROW-${rowNum}` : `SIG-${parsedTs}-${raw.symbol}`),
-              symbol: String(raw.symbol).toUpperCase().trim(),
+              id: raw.id || (rowNum > 0 ? `SHEET-ROW-${rowNum}` : `SIG-${parsedTs}-${sym}`),
+              symbol: sym,
               timeframe: raw.timeframe || '1h',
               direction: raw.direction,
               signalDirection: raw.direction,
               entryStatus: 'READY',
-              currentPrice: Number(raw.entry) || 0,
-              entry: Number(raw.entry) || 0,
+              currentPrice: entryVal,
+              entry: entryVal,
               stopLoss: Number(raw.stopLoss) || 0,
               takeProfit: Number(raw.takeProfit) || 0,
               tp1: Number(raw.tp1) || 0,
               tp2: Number(raw.takeProfit) || 0,
               tp3: Number(raw.tp3) || 0,
-              tp1Hit: false,
+              tp1Hit: String(raw.tp1Hit || '').toUpperCase() === 'YES',
               tp2Hit: false,
               tp3Hit: false,
-              targetHit: 'OPEN',
-              rr: raw.rr || '1:2.0',
+              targetHit: String(raw.tp1Hit || '').toUpperCase() === 'YES' ? 'TP1' : 'OPEN',
+              rr: raw.rr || raw.rrRatio || '1:2.0',
               confidence: Number(raw.confidence) || 75,
               signalQuality: 'STRONG',
-              model: raw.model || 'Google-Sheet-Live',
+              model: raw.model || 'Google-Sheet-Journal',
               timestamp: parsedTs,
-              resolved: false,
-              outcome: 'OPEN',
+              resolved: isResolved,
+              outcome: isResolved ? (rawOutcome as any) : 'OPEN',
+              closedPrice: Number(raw.closedPrice) || undefined,
+              closedTime: raw.closedTime || undefined,
               userId: raw.userId || 'global',
-              reasoning: raw.reasoning || 'Synced open signal from Google Sheet Journal.',
+              userDisplayName: String(raw.userId || 'SHEET_JOURNAL').toUpperCase(),
+              reasoning: raw.reasoning || 'Synced from Google Sheet Journal.',
               sheetRow: rowNum
             };
             return normalizeSignalTargets(baseSig);
-          });
+          })
+          .filter(s => !s.resolved && (!s.outcome || s.outcome === 'OPEN') && (!s.sheetRow || !resolvingRowsRef.current.has(s.sheetRow)));
 
         setGlobalJournal(prev => {
           const existingByRow = new Map<number, TradingSignal>();
@@ -1065,35 +1204,40 @@ export default function App() {
             existingById.set(item.id, item);
           }
 
-          const mergedList = [...prev];
-          for (const sheetSig of sheetOpenSignals) {
+          const nextOpenList: TradingSignal[] = sheetOpenSignals.map(sheetSig => {
             const match = (sheetSig.sheetRow && existingByRow.get(sheetSig.sheetRow)) || existingById.get(sheetSig.id);
-            if (!match) {
-              mergedList.push(sheetSig);
-            } else if (!match.resolved) {
-              // Ensure sheetRow and targets stay synced
-              const idx = mergedList.findIndex(x => x.id === match.id);
-              if (idx !== -1) {
-                mergedList[idx] = normalizeSignalTargets({
-                  ...match,
-                  sheetRow: sheetSig.sheetRow || match.sheetRow,
-                  entry: sheetSig.entry || match.entry,
-                  stopLoss: sheetSig.stopLoss || match.stopLoss,
-                  takeProfit: sheetSig.takeProfit || match.takeProfit,
-                  timestamp: sheetSig.timestamp || match.timestamp
-                });
-              }
+            if (!match) return sheetSig;
+            return normalizeSignalTargets({
+              ...match,
+              ...sheetSig,
+              tp1Hit: Boolean(match.tp1Hit || sheetSig.tp1Hit),
+              resolved: false,
+              outcome: 'OPEN'
+            });
+          });
+
+          // Preserve any newly generated local OPEN signal from the last 2 minutes that hasn't received a sheetRow yet
+          const now = Date.now();
+          for (const localSig of prev) {
+            if (
+              !localSig.resolved &&
+              (!localSig.outcome || localSig.outcome === 'OPEN') &&
+              (!localSig.sheetRow || localSig.sheetRow === 0) &&
+              now - localSig.timestamp < 120000 &&
+              !nextOpenList.some(x => x.id === localSig.id || (x.symbol === localSig.symbol && Math.abs(x.timestamp - localSig.timestamp) < 60000))
+            ) {
+              nextOpenList.push(normalizeSignalTargets(localSig));
             }
           }
 
-          mergedList.sort((a, b) => b.timestamp - a.timestamp);
-          localStorage.setItem(KEYS.JOURNAL_GLOBAL, JSON.stringify(mergedList));
-          return mergedList;
+          nextOpenList.sort((a, b) => b.timestamp - a.timestamp);
+          localStorage.setItem(KEYS.JOURNAL_GLOBAL, JSON.stringify(nextOpenList));
+          return nextOpenList;
         });
 
-        if (sheetOpenSignals.length > 0) {
-          fetchMarketTickers(sheetOpenSignals);
-        }
+        fetchMarketTickers(sheetOpenSignals);
+      } else {
+        fetchMarketTickers();
       }
     } catch (e) {
       console.warn('[OpenSignals] Failed to fetch open signals from Google Sheet:', e);
@@ -1553,8 +1697,9 @@ export default function App() {
     const entry = Number(sig.entry) || 1;
     const tp = Number(sig.takeProfit) || entry;
     const sl = Number(sig.stopLoss) || entry;
-    const isLong = sig.direction === 'LONG';
-    const effectivePrice = sig.resolved ? (sig.closedPrice || entry) : livePrice;
+    const rawDir = String(sig.direction || '').toUpperCase().trim();
+    const isLong = rawDir === 'LONG' || rawDir === 'BUY' || rawDir === 'BULLISH';
+    const effectivePrice = sig.resolved ? (sig.closedPrice || livePrice || entry) : (livePrice || sig.currentPrice || entry);
 
     let progressPct = 0; // -100 to +100 (or beyond if runner)
     let statusText = '';
@@ -1571,7 +1716,7 @@ export default function App() {
         isProfit = false;
       }
     } else {
-      // SHORT
+      // SHORT / SELL
       if (effectivePrice <= entry) {
         const reward = entry - tp;
         progressPct = reward > 0 ? ((entry - effectivePrice) / reward) * 100 : 0;
@@ -1593,7 +1738,9 @@ export default function App() {
         statusText = `🛑 Stopped Out (-100.0% Loss)`;
       }
     } else {
-      if (progressPct >= 100) {
+      if (progressPct >= 150) {
+        statusText = `🏆 T3 Hit (+${roundedPct}% Runner Achieved)`;
+      } else if (progressPct >= 100) {
         statusText = `🚀 T2 Hit (+${roundedPct}% TP Achieved)`;
       } else if (progressPct >= 50) {
         statusText = `🎯 T1 Hit (+${roundedPct}% Running towards T2)`;
@@ -1789,10 +1936,30 @@ export default function App() {
         return [];
       };
 
-      const [candles, candles4h, candles1d] = await Promise.all([
+      const fetchLatestSymbolPrice = async (symbol: string): Promise<number | null> => {
+        const priceUrls = [
+          `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${symbol}`,
+          `https://data-api.binance.vision/api/v3/ticker/price?symbol=${symbol}`,
+          `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`
+        ];
+        for (const url of priceUrls) {
+          try {
+            const r = await fetch(url);
+            if (r.ok) {
+              const d = await r.json();
+              const p = parseFloat(d?.price);
+              if (Number.isFinite(p) && p > 0) return p;
+            }
+          } catch {}
+        }
+        return null;
+      };
+
+      const [candles, candles4h, candles1d, latestSpotOrFuturesPrice] = await Promise.all([
         fetchDirectKlines(selectedCoin, selectedTimeframe, 250),
         fetchDirectKlines(selectedCoin, '4h', 250),
-        fetchDirectKlines(selectedCoin, '1d', 250)
+        fetchDirectKlines(selectedCoin, '1d', 250),
+        fetchLatestSymbolPrice(selectedCoin)
       ]);
 
       // STRICT CHECK: Agar live data nahi aaya to fake signal mat banao!
@@ -1803,14 +1970,47 @@ export default function App() {
         return;
       }
 
-      // Exact live close price from the latest candle
-      const livePrice = candles[candles.length - 1][4];
+      // Latest live price from Binance ticker endpoint (fallback to latest candle close)
+      const livePrice = latestSpotOrFuturesPrice && latestSpotOrFuturesPrice > 0
+        ? latestSpotOrFuturesPrice
+        : candles[candles.length - 1][4];
+      // Sync latest candle close with latest live price
+      candles[candles.length - 1][4] = livePrice;
       setMarketPrices(prev => ({ ...prev, [selectedCoin]: livePrice }));
 
-      setScanStep('Executing Groq Primary Engine (openai/gpt-oss-120b)...');
+      // Format last 50 candles with both OHLC object keys and array indices for backend momentum analysis
+      const formatCandlesForBackend = (rawCandles: number[][], limit = 50) => {
+        return rawCandles.slice(-limit).map(k => ({
+          0: Number(k[0]),
+          1: Number(k[1]),
+          2: Number(k[2]),
+          3: Number(k[3]),
+          4: Number(k[4]),
+          5: Number(k[5]),
+          time: Number(k[0]),
+          open: Number(k[1]),
+          high: Number(k[2]),
+          low: Number(k[3]),
+          close: Number(k[4]),
+          volume: Number(k[5]),
+          o: Number(k[1]),
+          h: Number(k[2]),
+          l: Number(k[3]),
+          c: Number(k[4]),
+          v: Number(k[5])
+        }));
+      };
+
+      setScanStep('AI is analyzing market momentum...');
       const ind1 = computeIndicators(candles, livePrice);
-      const ind4h = computeIndicators(candles4h.length >= 30 ? candles4h : candles, livePrice);
-      const ind1d = computeIndicators(candles1d.length >= 30 ? candles1d : candles, livePrice);
+      const valid4h = candles4h.length >= 30 ? candles4h : candles;
+      const valid1d = candles1d.length >= 30 ? candles1d : candles;
+      const ind4h = computeIndicators(valid4h, livePrice);
+      const ind1d = computeIndicators(valid1d, livePrice);
+
+      const recent50Candles = formatCandlesForBackend(candles, 50);
+      const recent50Candles4h = formatCandlesForBackend(valid4h, 50);
+      const recent50Candles1d = formatCandlesForBackend(valid1d, 50);
 
       const payload = {
         action: 'signal',
@@ -1818,6 +2018,7 @@ export default function App() {
         symbol: selectedCoin,
         timeframe: selectedTimeframe,
         currentPrice: livePrice,
+        price: livePrice,
         marketTimestamp: new Date().toISOString(),
         rsi: ind1.rsi,
         macd: ind1.macd.macd,
@@ -1834,25 +2035,57 @@ export default function App() {
         tf1: {
           timeframe: selectedTimeframe,
           rsi: ind1.rsi,
+          macd: ind1.macd.macd,
+          macdSignal: ind1.macd.signal,
+          macdHistogram: ind1.macd.hist,
+          adx: ind1.adx,
+          atr: ind1.atr,
+          volumeRatio: ind1.volRatio,
           ema20: ind1.ema20,
-          trend: ind1.rsi > 50 ? 'BULLISH' : 'BEARISH'
+          ema50: ind1.ema50,
+          ema200: ind1.ema200,
+          support: ind1.support,
+          resistance: ind1.resistance,
+          trend: livePrice >= ind1.ema20 ? 'BULLISH' : 'BEARISH'
         },
         tf2: {
           timeframe: '4h',
           rsi: ind4h.rsi,
+          macd: ind4h.macd.macd,
+          macdSignal: ind4h.macd.signal,
+          macdHistogram: ind4h.macd.hist,
+          adx: ind4h.adx,
+          atr: ind4h.atr,
+          volumeRatio: ind4h.volRatio,
           ema20: ind4h.ema20,
-          trend: ind4h.rsi > 50 ? 'BULLISH' : 'BEARISH'
+          ema50: ind4h.ema50,
+          ema200: ind4h.ema200,
+          support: ind4h.support,
+          resistance: ind4h.resistance,
+          trend: livePrice >= ind4h.ema20 ? 'BULLISH' : 'BEARISH'
         },
         tf3: {
           timeframe: '1d',
           rsi: ind1d.rsi,
+          macd: ind1d.macd.macd,
+          macdSignal: ind1d.macd.signal,
+          macdHistogram: ind1d.macd.hist,
+          adx: ind1d.adx,
+          atr: ind1d.atr,
+          volumeRatio: ind1d.volRatio,
           ema20: ind1d.ema20,
-          trend: ind1d.rsi > 50 ? 'BULLISH' : 'BEARISH'
+          ema50: ind1d.ema50,
+          ema200: ind1d.ema200,
+          support: ind1d.support,
+          resistance: ind1d.resistance,
+          trend: livePrice >= ind1d.ema20 ? 'BULLISH' : 'BEARISH'
         },
-        recentCandles: candles
+        recentCandles: recent50Candles,
+        candles4h: recent50Candles4h,
+        candles1d: recent50Candles1d
       };
 
-      setScanStep('Evaluating Confluence Gates & Logging to Google Sheet Journal...');
+      setScanStep('AI is analyzing market momentum...');
       const res = await callBackend('signal', payload);
 
       if (!res || res.error) {
@@ -1923,23 +2156,25 @@ export default function App() {
         reasoning: res.reasoning || '',
         warnings: res.warnings || [],
         waitFor: res.waitFor || null,
-        sheetRow: Number(res.row || res.journalRow || 0)
+        sheetRow: Number(res.sheetRow || res.row || res.journalRow || 0)
       };
 
       setCurrentSignal(newSignal);
 
-      // Save to Local Journals
-      setUserJournal(prev => {
-        const updated = [newSignal, ...prev.filter(s => s.id !== newSignal.id)];
-        localStorage.setItem(`${KEYS.JOURNAL_USER_PREFIX}${user.username}`, JSON.stringify(updated));
-        return updated;
-      });
+      // Save to Local Journals (only if actionable OPEN trade)
+      if (isReady && (direction === 'LONG' || direction === 'SHORT')) {
+        setUserJournal(prev => {
+          const updated = [newSignal, ...prev.filter(s => s.id !== newSignal.id)];
+          localStorage.setItem(`${KEYS.JOURNAL_USER_PREFIX}${user.username}`, JSON.stringify(updated));
+          return updated;
+        });
 
-      setGlobalJournal(prev => {
-        const updated = [newSignal, ...prev.filter(s => s.id !== newSignal.id)];
-        localStorage.setItem(KEYS.JOURNAL_GLOBAL, JSON.stringify(updated));
-        return updated;
-      });
+        setGlobalJournal(prev => {
+          const updated = [newSignal, ...prev.filter(s => s.id !== newSignal.id)];
+          localStorage.setItem(KEYS.JOURNAL_GLOBAL, JSON.stringify(updated));
+          return updated;
+        });
+      }
 
       // Update Quota Left from code.gs response
       if (res.signalsLeft !== undefined) {
@@ -1969,82 +2204,254 @@ export default function App() {
     }
   };
 
-  // Accuracy Calculation directly from Google Sheet + local
-  const activeJournal = statsScope === 'GLOBAL' ? globalJournal : userJournal;
+  // -------------------------------------------------------------
+  // LIGHTWEIGHT CHARTS BINANCE FAPI LIVE CANDLESTICK & TP/SL TRACKER
+  // (Stable lifecycle — zero flickering on background price/journal updates)
+  // -------------------------------------------------------------
+  useEffect(() => {
+    if (activeTab === 'progress') {
+      fetchOpenSignalsFromSheet();
+      fetchSheetAccuracy();
+    }
+  }, [activeTab, fetchOpenSignalsFromSheet, fetchSheetAccuracy]);
+
+  useEffect(() => {
+    if (activeTab !== 'chart' || chartEngine !== 'LIGHTWEIGHT' || !lwChartContainerRef.current) {
+      lwCandleSeriesRef.current = null;
+      lwLastCandleRef.current = null;
+      lwPriceLinesRef.current = [];
+      return;
+    }
+
+    const container = lwChartContainerRef.current;
+    container.innerHTML = '';
+    setIsChartLoading(true);
+
+    const coinMeta = SUPPORTED_COINS.find(c => c.symbol === selectedCoin);
+    const refPrice = coinMeta?.basePrice || 100;
+    const precision = refPrice < 0.001 ? 8 : (refPrice < 1 ? 4 : (refPrice < 10 ? 3 : 2));
+    const minMove = Number((1 / Math.pow(10, precision)).toFixed(precision));
+
+    const chart = createChart(container, {
+      width: container.clientWidth || 600,
+      height: 420,
+      layout: {
+        background: { type: ColorType.Solid, color: '#0e1320' },
+        textColor: '#94a3b8'
+      },
+      grid: {
+        vertLines: { color: 'rgba(255, 255, 255, 0.05)' },
+        horzLines: { color: 'rgba(255, 255, 255, 0.05)' }
+      },
+      rightPriceScale: {
+        borderColor: 'rgba(255, 255, 255, 0.1)',
+        autoScale: true
+      },
+      timeScale: {
+        borderColor: 'rgba(255, 255, 255, 0.1)',
+        timeVisible: true,
+        secondsVisible: false
+      }
+    });
+
+    const candleSeries = chart.addSeries(CandlestickSeries, {
+      upColor: '#00e676',
+      downColor: '#ff4d4d',
+      borderVisible: false,
+      wickUpColor: '#00e676',
+      wickDownColor: '#ff4d4d',
+      priceFormat: {
+        type: 'price',
+        precision,
+        minMove
+      }
+    });
+
+    lwCandleSeriesRef.current = candleSeries;
+    lwLastCandleRef.current = null;
+    lwPriceLinesRef.current = [];
+
+    let isDisposed = false;
+    let initialLoaded = false;
+
+    const loadAndTrackChartKlines = async () => {
+      const klines = await fetchKlinesForSymbol(selectedCoin, selectedTimeframe, 180);
+      if (isDisposed) return;
+
+      if (!Array.isArray(klines) || klines.length === 0) {
+        setIsChartLoading(false);
+        return;
+      }
+
+      // Deduplicate and sort strictly ascending by time to prevent Lightweight Charts assertion errors
+      const byTime = new Map<number, { time: any; open: number; high: number; low: number; close: number }>();
+      for (const k of klines) {
+        const t = Math.floor(Number(k[0]) / 1000);
+        const o = parseFloat(k[1]);
+        const h = parseFloat(k[2]);
+        const l = parseFloat(k[3]);
+        const c = parseFloat(k[4]);
+        if (Number.isFinite(t) && t > 0 && Number.isFinite(o) && Number.isFinite(h) && Number.isFinite(l) && Number.isFinite(c)) {
+          byTime.set(t, { time: t as any, open: o, high: h, low: l, close: c });
+        }
+      }
+
+      const uniqueSorted = Array.from(byTime.values()).sort((a, b) => Number(a.time) - Number(b.time));
+
+      if (uniqueSorted.length > 0 && !isDisposed) {
+        if (!initialLoaded) {
+          candleSeries.setData(uniqueSorted);
+          chart.timeScale().fitContent();
+          initialLoaded = true;
+          setIsChartLoading(false);
+        } else {
+          // Smooth incremental update of the last 2 bars without resetting canvas or causing flicker
+          const secondLast = uniqueSorted[uniqueSorted.length - 2];
+          const last = uniqueSorted[uniqueSorted.length - 1];
+          if (secondLast) candleSeries.update(secondLast);
+          if (last) candleSeries.update(last);
+        }
+
+        const latestBar = uniqueSorted[uniqueSorted.length - 1];
+        lwLastCandleRef.current = {
+          time: Number(latestBar.time),
+          open: latestBar.open,
+          high: latestBar.high,
+          low: latestBar.low,
+          close: latestBar.close
+        };
+
+        setMarketPrices(prev => (prev[selectedCoin] === latestBar.close ? prev : { ...prev, [selectedCoin]: latestBar.close }));
+      } else {
+        setIsChartLoading(false);
+      }
+    };
+
+    loadAndTrackChartKlines();
+    const pollTimer = setInterval(loadAndTrackChartKlines, 10000);
+
+    const handleResize = () => {
+      if (!isDisposed && container && container.clientWidth > 0) {
+        chart.applyOptions({ width: container.clientWidth });
+      }
+    };
+    window.addEventListener('resize', handleResize);
+
+    let resizeObserver: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      resizeObserver = new ResizeObserver(() => handleResize());
+      resizeObserver.observe(container);
+    }
+
+    return () => {
+      isDisposed = true;
+      clearInterval(pollTimer);
+      window.removeEventListener('resize', handleResize);
+      if (resizeObserver) resizeObserver.disconnect();
+      lwCandleSeriesRef.current = null;
+      lwLastCandleRef.current = null;
+      lwPriceLinesRef.current = [];
+      chart.remove();
+    };
+  }, [activeTab, chartEngine, selectedCoin, selectedTimeframe, fetchKlinesForSymbol]);
+
+  // Smoothly tick current candle when marketPrices[selectedCoin] updates without recreating chart
+  useEffect(() => {
+    const series = lwCandleSeriesRef.current;
+    const lastBar = lwLastCandleRef.current;
+    const livePrice = marketPrices[selectedCoin];
+    if (!series || !lastBar || !livePrice || !Number.isFinite(livePrice) || livePrice <= 0) return;
+
+    const updatedBar = {
+      time: lastBar.time as any,
+      open: lastBar.open,
+      high: Math.max(lastBar.high, livePrice),
+      low: Math.min(lastBar.low, livePrice),
+      close: livePrice
+    };
+    lwLastCandleRef.current = updatedBar;
+    try {
+      series.update(updatedBar);
+    } catch {}
+  }, [marketPrices, selectedCoin]);
+
+  // Draw / update active signal price lines on the chart without destroying the chart canvas
+  useEffect(() => {
+    const series = lwCandleSeriesRef.current;
+    if (!series || activeTab !== 'chart' || chartEngine !== 'LIGHTWEIGHT') return;
+
+    for (const oldLine of lwPriceLinesRef.current) {
+      try {
+        series.removePriceLine(oldLine);
+      } catch {}
+    }
+    lwPriceLinesRef.current = [];
+
+    const coinSig = globalJournal.find(s => s.symbol === selectedCoin && !s.resolved && (!s.outcome || s.outcome === 'OPEN'));
+    if (coinSig) {
+      const norm = normalizeSignalTargets(coinSig);
+      try {
+        lwPriceLinesRef.current.push(
+          series.createPriceLine({ price: norm.entry, color: '#ffffff', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'ENTRY' }),
+          series.createPriceLine({ price: norm.stopLoss, color: '#ff4d4d', lineWidth: 2, lineStyle: 0, axisLabelVisible: true, title: 'SL' }),
+          series.createPriceLine({ price: norm.tp1, color: '#00e676', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'T1' }),
+          series.createPriceLine({ price: norm.tp2, color: '#00d2ff', lineWidth: 2, lineStyle: 0, axisLabelVisible: true, title: 'T2 (MAIN TP)' }),
+          series.createPriceLine({ price: norm.tp3, color: '#ffcc00', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'T3 (RUNNER)' })
+        );
+      } catch {}
+    }
+  }, [activeTab, chartEngine, selectedCoin, globalJournal]);
+
+  // Accuracy Calculation directly from Google Sheet Global Database + Live FAPI Evaluation
+  const activeJournal = globalJournal;
+
+  // Strictly display ONLY Open / Active signals in Google Sheet Journal Signals list
+  const displayedSignals = useMemo(() => {
+    const list = activeJournal.map(s => normalizeSignalTargets(s));
+    return list.filter(s => {
+      if (s.direction !== 'LONG' && s.direction !== 'SHORT') return false;
+      if (s.resolved || s.outcome === 'WIN' || s.outcome === 'LOSS' || s.outcome === 'EXPIRED') return false;
+      const liveP = marketPrices[s.symbol] || s.currentPrice || s.entry;
+      const pnl = calculateSignalPnLProgress(s, liveP);
+      const hits = computeTargetHits(s, liveP, pnl.progressPct);
+      // Once main TP (T2) or SL is hit, do not show in active signals list
+      if (hits.t2Hit || hits.slHit) return false;
+      return true;
+    });
+  }, [activeJournal, marketPrices]);
 
   const stats = useMemo(() => {
-    const isGlobal = statsScope === 'GLOBAL';
-    const targetList = isGlobal ? globalJournal : userJournal;
+    const activeCount = displayedSignals.length;
+    let activeT1Hits = 0;
 
-    const resolved = targetList.filter(s => s.resolved);
-    const active = targetList.filter(s => !s.resolved && (s.outcome === 'OPEN' || !s.outcome));
-
-    // Live active TP hits occurring in running signals
-    const liveActiveT1 = active.filter(s => Boolean(s.tp1Hit)).length;
-    const liveActiveT2 = active.filter(s => Boolean(s.tp2Hit)).length;
-    const liveActiveT3 = active.filter(s => Boolean(s.tp3Hit)).length;
-
-    if (isGlobal) {
-      // Base numbers from Google Sheet Journal tab
-      const baseSheetWins = sheetAccuracy.wins;
-      const baseSheetLosses = sheetAccuracy.losses;
-      const baseTotalClosed = sheetAccuracy.totalClosed;
-
-      // Each TP hit (TP1, TP2, TP3) dynamically increments the TP1+ Wins tally:
-      // TP1 hit -> 49 + 1 = 50, TP2 hit -> 50 + 1 = 51, TP3 hit -> 51 + 1 = 52
-      const t1Count = sheetAccuracy.tp1Wins + liveActiveT1;
-      const t2Count = sheetAccuracy.tp2Wins + liveActiveT2;
-      const t3Count = sheetAccuracy.tp3Wins + liveActiveT3;
-
-      const totalWins = baseSheetWins + liveActiveT1 + liveActiveT2 + liveActiveT3;
-      const totalLosses = baseSheetLosses;
-      const totalClosed = baseTotalClosed;
-
-      const decisive = totalWins + totalLosses;
-      const winRate = decisive > 0 ? ((totalWins / decisive) * 100).toFixed(1) + '%' : '0.0%';
-
-      return {
-        activeCount: active.length,
-        totalClosed,
-        wins: totalWins,
-        losses: totalLosses,
-        winRate,
-        t1Count,
-        t2Count,
-        t3Count
-      };
-    } else {
-      // Personal user stats
-      const localLosses = resolved.filter(s => s.outcome === 'LOSS').length;
-
-      const pT1 = targetList.filter(s => Boolean(s.tp1Hit)).length;
-      const pT2 = targetList.filter(s => Boolean(s.tp2Hit)).length;
-      const pT3 = targetList.filter(s => Boolean(s.tp3Hit)).length;
-      const pWins = pT1 + pT2 + pT3;
-
-      const decisive = pWins + localLosses;
-      const winRate = decisive > 0 ? ((pWins / decisive) * 100).toFixed(1) + '%' : '0.0%';
-
-      return {
-        activeCount: active.length,
-        totalClosed: decisive,
-        wins: pWins,
-        losses: localLosses,
-        winRate,
-        t1Count: pT1,
-        t2Count: pT2,
-        t3Count: pT3
-      };
+    for (const sig of displayedSignals) {
+      const liveP = marketPrices[sig.symbol] || sig.currentPrice || sig.entry;
+      const pnl = calculateSignalPnLProgress(sig, liveP);
+      const hits = computeTargetHits(sig, liveP, pnl.progressPct);
+      if (hits.t1Hit) activeT1Hits++;
     }
-  }, [statsScope, globalJournal, userJournal, sheetAccuracy]);
 
-  const displayedSignals = useMemo(() => {
-    let list = activeJournal.map(s => normalizeSignalTargets(s));
-    if (filterScope === 'ACTIVE') list = list.filter(s => !s.resolved && (s.outcome === 'OPEN' || !s.outcome));
-    if (filterScope === 'WINS') list = list.filter(s => s.outcome === 'WIN');
-    if (filterScope === 'LOSSES') list = list.filter(s => s.outcome === 'LOSS');
-    return list;
-  }, [activeJournal, filterScope]);
+    const totalWins = sheetAccuracy.wins;
+    const totalLosses = sheetAccuracy.losses;
+    const totalClosed = Math.max(sheetAccuracy.totalClosed, totalWins + totalLosses);
+    const t1Count = Math.max(sheetAccuracy.tp1Wins, totalWins) + activeT1Hits;
+    const t2Count = Math.max(sheetAccuracy.tp2Wins, totalWins);
+    const t3Count = sheetAccuracy.tp3Wins;
+
+    const decisive = totalWins + totalLosses;
+    const winRate = decisive > 0 ? ((totalWins / decisive) * 100).toFixed(1) + '%' : '0.0%';
+
+    return {
+      activeCount,
+      totalClosed,
+      wins: totalWins,
+      losses: totalLosses,
+      winRate,
+      t1Count,
+      t2Count,
+      t3Count
+    };
+  }, [displayedSignals, marketPrices, sheetAccuracy]);
 
   // Dynamic AI Quantitative Radar Hot Pairs computed from live market changes
   const recommendedHotPairs = useMemo(() => {
@@ -2826,13 +3233,35 @@ export default function App() {
                 )}
               </div>
 
-              {/* Scanning State */}
+              {/* Scanning State & Market Momentum Indicator */}
               {isScanning && (
                 <div className="radar-screen" style={{ marginTop: '14px', display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '24px' }}>
+                  <div
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      background: 'rgba(0, 229, 255, 0.12)',
+                      border: '1px solid rgba(0, 229, 255, 0.4)',
+                      borderRadius: '999px',
+                      padding: '6px 14px',
+                      marginBottom: '14px',
+                      color: '#00e5ff',
+                      fontSize: '0.82rem',
+                      fontWeight: 700,
+                      letterSpacing: '0.3px'
+                    }}
+                  >
+                    <span className="ai-pulse-dot" />
+                    <span>AI is analyzing market momentum</span>
+                  </div>
                   <div className="radar-circle" />
                   <div className="radar-scanner" />
                   <div style={{ marginTop: '14px', color: 'var(--accent-cyan)', fontWeight: 700, fontSize: '0.9rem' }}>
-                    {scanStep}
+                    {scanStep || 'AI is analyzing market momentum...'}
+                  </div>
+                  <div style={{ marginTop: '4px', color: 'var(--text-secondary)', fontSize: '0.75rem' }}>
+                    Syncing 50 OHLC candles ({selectedTimeframe}) + HTF (4H & 1D) + Live Price for {selectedCoin}
                   </div>
                 </div>
               )}
@@ -3020,22 +3449,47 @@ export default function App() {
                     const cT1Gain = Math.abs(((Number(currentSignal.tp1) - cEntry) / cEntry) * 100).toFixed(2);
                     const cT2Gain = Math.abs(((Number(currentSignal.tp2) - cEntry) / cEntry) * 100).toFixed(2);
                     const cT3Gain = Math.abs(((Number(currentSignal.tp3) - cEntry) / cEntry) * 100).toFixed(2);
+                    const cHits = computeTargetHits(currentSignal, livePrice, pnl.progressPct);
                     return (
                       <div className="tracker-targets-grid">
-                        <div className="tracker-target-box">
-                          <div className="tracker-target-title">T1 (50% TP)</div>
+                        <div
+                          className="tracker-target-box"
+                          style={{
+                            borderColor: cHits.t1Hit ? '#00e676' : 'rgba(255,255,255,0.08)',
+                            background: cHits.t1Hit ? 'rgba(0,230,118,0.12)' : undefined
+                          }}
+                        >
+                          <div className="tracker-target-title">{cHits.t1Hit ? '✅ ' : ''}T1 (+{cT1Gain}%)</div>
                           <div className="tracker-target-price green">${formatCryptoPrice(currentSignal.tp1)}</div>
-                          <span className="tracker-target-tag green">+{cT1Gain}%</span>
+                          <span className={`tracker-target-tag ${cHits.t1Hit ? 'green' : ''}`}>
+                            {cHits.t1Hit ? '✓ T1 HIT' : 'PENDING'}
+                          </span>
                         </div>
-                        <div className="tracker-target-box">
-                          <div className="tracker-target-title">T2 (100% TP)</div>
+                        <div
+                          className="tracker-target-box"
+                          style={{
+                            borderColor: cHits.t2Hit ? '#00d2ff' : 'rgba(255,255,255,0.08)',
+                            background: cHits.t2Hit ? 'rgba(0,210,255,0.12)' : undefined
+                          }}
+                        >
+                          <div className="tracker-target-title">{cHits.t2Hit ? '✅ ' : ''}T2 (+{cT2Gain}%)</div>
                           <div className="tracker-target-price cyan">${formatCryptoPrice(currentSignal.tp2)}</div>
-                          <span className="tracker-target-tag cyan">+{cT2Gain}%</span>
+                          <span className={`tracker-target-tag ${cHits.t2Hit ? 'cyan' : ''}`}>
+                            {cHits.t2Hit ? '✓ T2 HIT' : 'PENDING'}
+                          </span>
                         </div>
-                        <div className="tracker-target-box">
-                          <div className="tracker-target-title">T3 (RUNNER)</div>
+                        <div
+                          className="tracker-target-box"
+                          style={{
+                            borderColor: cHits.t3Hit ? '#ffcc00' : 'rgba(255,255,255,0.08)',
+                            background: cHits.t3Hit ? 'rgba(255,204,0,0.12)' : undefined
+                          }}
+                        >
+                          <div className="tracker-target-title">{cHits.t3Hit ? '✅ ' : ''}T3 (+{cT3Gain}%)</div>
                           <div className="tracker-target-price yellow">${formatCryptoPrice(currentSignal.tp3)}</div>
-                          <span className="tracker-target-tag yellow">+{cT3Gain}%</span>
+                          <span className={`tracker-target-tag ${cHits.t3Hit ? 'yellow' : ''}`}>
+                            {cHits.t3Hit ? '✓ T3 HIT' : 'PENDING'}
+                          </span>
                         </div>
                       </div>
                     );
@@ -3117,38 +3571,35 @@ export default function App() {
         )}
 
         {/* ========================================================= */}
-        {/* TAB 2: LIVE SIGNAL PROGRESS & ACCURACY JOURNAL           */}
+        {/* TAB 2: LIVE SIGNAL PROGRESS & GOOGLE SHEET JOURNAL        */}
         {/* ========================================================= */}
         {activeTab === 'progress' && (
           <div className="tab-pane active">
-            {/* Accuracy Header & Scope Switcher */}
+            {/* Google Sheets Global Database Header */}
             <div className="material-card">
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
                 <div>
-                  <h2 className="card-title" style={{ marginBottom: 0 }}>
-                    {statsScope === 'GLOBAL' ? '📱 Signals generated on this device' : '👤 My Personal Signal Performance'}
+                  <h2 className="card-title" style={{ marginBottom: '2px' }}>
+                    🌐 Google Sheets Global Signal Journal
                   </h2>
-                  <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
-                    {statsScope === 'GLOBAL'
-                      ? 'Win/loss rate of signals generated on this device (localStorage). Real global stats ke liye Google Sheet Journal tab check karein.'
-                      : `Personal Performance: Win/loss rate of signals generated by ${user?.username.toUpperCase()}.`}
+                  <p style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', margin: 0 }}>
+                    Auto Win/Loss & TP/SL Tracking via Binance FAPI & Lightweight Charts
                   </p>
                 </div>
 
-                <div className="selector-group" style={{ padding: '2px', background: '#0b0f19', borderRadius: '6px', border: '1px solid var(--border-color)' }}>
-                  <button
-                    className={`tf-btn ${statsScope === 'GLOBAL' ? 'active' : ''}`}
-                    onClick={() => setStatsScope('GLOBAL')}
-                  >
-                    📱 This Device
-                  </button>
-                  <button
-                    className={`tf-btn ${statsScope === 'PERSONAL' ? 'active' : ''}`}
-                    onClick={() => setStatsScope('PERSONAL')}
-                  >
-                    👤 My Trades
-                  </button>
-                </div>
+                <button
+                  className="btn-secondary"
+                  style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '6px 12px', fontSize: '0.78rem' }}
+                  onClick={() => {
+                    showToast('Syncing Google Sheet Journal & Binance FAPI...', 'info');
+                    fetchOpenSignalsFromSheet();
+                    fetchSheetAccuracy();
+                    fetchMarketTickers();
+                  }}
+                >
+                  <RefreshCw size={14} />
+                  Sync Sheet Journal
+                </button>
               </div>
 
               {/* Accuracy Grid */}
@@ -3174,13 +3625,13 @@ export default function App() {
                   <div className="accuracy-val green">{stats.wins}</div>
                   <div className="stat-tp-breakdown" style={{ fontSize: '0.67rem', marginTop: '4px', display: 'flex', justifyContent: 'center', gap: '4px', flexWrap: 'wrap' }}>
                     <span title="Total times Take Profit 1 was hit" style={{ background: 'rgba(0,230,118,0.14)', color: '#00e676', padding: '1px 5px', borderRadius: '4px', fontWeight: 700 }}>
-                      T1: {stats.t1Count}
+                      T1✓: {stats.t1Count}
                     </span>
                     <span title="Total times Take Profit 2 was hit" style={{ background: 'rgba(0,210,255,0.14)', color: '#00d2ff', padding: '1px 5px', borderRadius: '4px', fontWeight: 700 }}>
-                      T2: {stats.t2Count}
+                      T2✓: {stats.t2Count}
                     </span>
                     <span title="Total times Take Profit 3 was hit" style={{ background: 'rgba(255,204,0,0.14)', color: '#ffcc00', padding: '1px 5px', borderRadius: '4px', fontWeight: 700 }}>
-                      T3: {stats.t3Count}
+                      T3✓: {stats.t3Count}
                     </span>
                   </div>
                 </div>
@@ -3203,37 +3654,29 @@ export default function App() {
               </div>
             </div>
 
-            {/* Filter Buttons */}
+            {/* Open / Active Signals Header */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap', gap: '8px' }}>
               <div style={{ fontSize: '0.9rem', fontWeight: 700 }}>
-                {statsScope === 'GLOBAL' ? '🌐 All Community Signals' : `👤 Signals for ${user?.username.toUpperCase()}`}:
+                🌐 Google Sheet Journal Signals:
               </div>
-              <div style={{ display: 'flex', gap: '4px' }}>
-                {(['ALL', 'ACTIVE', 'WINS', 'LOSSES'] as const).map(f => (
-                  <button
-                    key={f}
-                    className={`tf-btn ${filterScope === f ? 'active' : ''}`}
-                    onClick={() => setFilterScope(f)}
-                  >
-                    {f}
-                  </button>
-                ))}
+              <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                <span className="tf-btn active" style={{ cursor: 'default' }}>
+                  🟢 OPEN / ACTIVE ONLY ({displayedSignals.length})
+                </span>
               </div>
             </div>
 
-            {/* Signals Feed with Live Market PnL Progress Bars */}
+            {/* Signals Feed with Live Market PnL Progress Bars & T1/T2/T3 Tick Marks */}
             <div>
               {displayedSignals.length === 0 ? (
                 <div className="material-card" style={{ textAlign: 'center', padding: '30px', color: 'var(--text-secondary)' }}>
-                  Koi signal nahi mila. Naya signal generate karein!
+                  ✅ Is waqt Google Sheet Journal mein koi OPEN / ACTIVE trade mojood nahi hai. TP ya SL hit hone wale tamam signals Wins ({stats.wins}) aur Losses ({stats.losses}) mein record ho chuke hain!
                 </div>
               ) : (
                 displayedSignals.map(sig => {
                   const livePrice = marketPrices[sig.symbol] || sig.currentPrice || sig.entry;
-                  const t1Hit = Boolean(sig.tp1Hit || sig.targetHit === 'TP1' || sig.targetHit === 'TP2' || sig.targetHit === 'TP3');
-                  const t2Hit = Boolean(sig.tp2Hit || sig.targetHit === 'TP2' || sig.targetHit === 'TP3');
-                  const t3Hit = Boolean(sig.tp3Hit || sig.targetHit === 'TP3');
                   const pnl = calculateSignalPnLProgress(sig, livePrice);
+                  const { t1Hit, t2Hit, t3Hit, slHit } = computeTargetHits(sig, livePrice, pnl.progressPct);
 
                   return (
                     <div key={sig.id} className="live-tracker-card material-card">
@@ -3267,7 +3710,12 @@ export default function App() {
                               🎯 T1✓ HIT
                             </span>
                           )}
-                          {!t1Hit && !t2Hit && !t3Hit && (
+                          {!t1Hit && !t2Hit && !t3Hit && slHit && (
+                            <span className="tracker-pnl-pill loss" style={{ background: 'rgba(255,77,77,0.18)', color: '#ff6b8b', border: '1px solid #ff4d4d' }}>
+                              🛑 SL HIT
+                            </span>
+                          )}
+                          {!t1Hit && !t2Hit && !t3Hit && !slHit && (
                             <span className="tracker-pnl-pill neutral">
                               ● ACTIVE IN MARKET
                             </span>
@@ -3313,7 +3761,7 @@ export default function App() {
                           <div className="t-val">${formatCryptoPrice(sig.entry)}</div>
                         </div>
                         <div className="tracker-lvl-item">
-                          <div className="t-lbl">{sig.resolved ? 'EXIT' : 'LIVE'}</div>
+                          <div className="t-lbl">{sig.resolved || t2Hit || slHit ? 'EXIT / LIVE' : 'LIVE'}</div>
                           <div className="t-val green">${formatCryptoPrice(sig.closedPrice || livePrice)}</div>
                         </div>
                         <div className="tracker-lvl-item">
@@ -3334,25 +3782,43 @@ export default function App() {
 
                         return (
                           <div className="tracker-targets-grid">
-                            <div className="tracker-target-box" style={{ borderColor: t1Hit ? '#00e676' : 'rgba(255,255,255,0.08)' }}>
-                              <div className="tracker-target-title">T1 (+{sT1Gain}%)</div>
+                            <div
+                              className="tracker-target-box"
+                              style={{
+                                borderColor: t1Hit ? '#00e676' : 'rgba(255,255,255,0.08)',
+                                background: t1Hit ? 'rgba(0,230,118,0.12)' : undefined
+                              }}
+                            >
+                              <div className="tracker-target-title">{t1Hit ? '✅ ' : ''}T1 (+{sT1Gain}%)</div>
                               <div className="tracker-target-price green">${formatCryptoPrice(sig.tp1)}</div>
                               <span className={`tracker-target-tag ${t1Hit ? 'green' : ''}`}>
-                                {t1Hit ? '✓ HIT' : 'PENDING'}
+                                {t1Hit ? '✓ T1 HIT' : 'PENDING'}
                               </span>
                             </div>
-                            <div className="tracker-target-box" style={{ borderColor: t2Hit ? '#00d2ff' : 'rgba(255,255,255,0.08)' }}>
-                              <div className="tracker-target-title">T2 (+{sT2Gain}%)</div>
+                            <div
+                              className="tracker-target-box"
+                              style={{
+                                borderColor: t2Hit ? '#00d2ff' : 'rgba(255,255,255,0.08)',
+                                background: t2Hit ? 'rgba(0,210,255,0.12)' : undefined
+                              }}
+                            >
+                              <div className="tracker-target-title">{t2Hit ? '✅ ' : ''}T2 (+{sT2Gain}%)</div>
                               <div className="tracker-target-price cyan">${formatCryptoPrice(sig.tp2)}</div>
                               <span className={`tracker-target-tag ${t2Hit ? 'cyan' : ''}`}>
-                                {t2Hit ? '✓ HIT' : 'PENDING'}
+                                {t2Hit ? '✓ T2 HIT' : 'PENDING'}
                               </span>
                             </div>
-                            <div className="tracker-target-box" style={{ borderColor: t3Hit ? '#ffcc00' : 'rgba(255,255,255,0.08)' }}>
-                              <div className="tracker-target-title">T3 (+{sT3Gain}%)</div>
+                            <div
+                              className="tracker-target-box"
+                              style={{
+                                borderColor: t3Hit ? '#ffcc00' : 'rgba(255,255,255,0.08)',
+                                background: t3Hit ? 'rgba(255,204,0,0.12)' : undefined
+                              }}
+                            >
+                              <div className="tracker-target-title">{t3Hit ? '✅ ' : ''}T3 (+{sT3Gain}%)</div>
                               <div className="tracker-target-price yellow">${formatCryptoPrice(sig.tp3)}</div>
                               <span className={`tracker-target-tag ${t3Hit ? 'yellow' : ''}`}>
-                                {t3Hit ? '✓ HIT' : 'PENDING'}
+                                {t3Hit ? '✓ T3 HIT' : 'PENDING'}
                               </span>
                             </div>
                           </div>
@@ -3367,12 +3833,12 @@ export default function App() {
         )}
 
         {/* ========================================================= */}
-        {/* TAB 3: TRADINGVIEW CHART & SUPPORTED MARKETS              */}
+        {/* TAB 3: LIGHTWEIGHT CHART (FAPI TRACKER) & TRADINGVIEW     */}
         {/* ========================================================= */}
         {activeTab === 'chart' && (
           <div className="tab-pane active">
             <div className="material-card">
-              <div className="chart-header-row">
+              <div className="chart-header-row" style={{ flexWrap: 'wrap', gap: '8px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <span className="chart-price-large">${(marketPrices[selectedCoin] || 84500).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
                   <span className={`chart-change-badge ${(marketChanges[selectedCoin] || 0) >= 0 ? 'up' : 'down'}`}>
@@ -3380,26 +3846,81 @@ export default function App() {
                   </span>
                 </div>
 
-                <div className="timeframe-pill-group">
-                  {['15m', '1h', '4h', '1d'].map(tf => (
+                <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
+                  <div className="timeframe-pill-group">
                     <button
-                      key={tf}
-                      className={`tf-btn ${selectedTimeframe === tf ? 'active' : ''}`}
-                      onClick={() => setSelectedTimeframe(tf)}
+                      className={`tf-btn ${chartEngine === 'LIGHTWEIGHT' ? 'active' : ''}`}
+                      onClick={() => setChartEngine('LIGHTWEIGHT')}
+                      title="Binance FAPI Lightweight Chart with Live TP/SL Lines"
                     >
-                      {tf}
+                      ⚡ FAPI Tracker Chart
                     </button>
-                  ))}
+                    <button
+                      className={`tf-btn ${chartEngine === 'TRADINGVIEW' ? 'active' : ''}`}
+                      onClick={() => setChartEngine('TRADINGVIEW')}
+                      title="TradingView Pro Chart"
+                    >
+                      📊 TradingView
+                    </button>
+                  </div>
+
+                  <div className="timeframe-pill-group">
+                    {['15m', '1h', '4h', '1d'].map(tf => (
+                      <button
+                        key={tf}
+                        className={`tf-btn ${selectedTimeframe === tf ? 'active' : ''}`}
+                        onClick={() => setSelectedTimeframe(tf)}
+                      >
+                        {tf}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
 
-              <div style={{ width: '100%', height: '420px', borderRadius: '8px', overflow: 'hidden', background: '#0e1320' }}>
-                <iframe
-                  title="TradingView Chart"
-                  src={`https://s.tradingview.com/widgetembed/?frameElementId=tradingview_chart&symbol=BINANCE:${selectedCoin}&interval=${selectedTimeframe === '15m' ? '15' : selectedTimeframe === '1h' ? '60' : selectedTimeframe === '4h' ? '240' : 'D'}&hidesidetoolbar=1&symboledit=1&saveimage=0&toolbarbg=f1f3f6&studies=[]&theme=dark&style=1&timezone=Asia%2FKarachi&studies_overrides={}&overrides={}&enabled_features=[]&disabled_features=[]&locale=en`}
-                  style={{ width: '100%', height: '100%', border: 'none' }}
-                />
-              </div>
+              {chartEngine === 'LIGHTWEIGHT' ? (
+                <div style={{ position: 'relative' }}>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--accent-cyan)', marginBottom: '6px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span>🟢 Live Binance FAPI (`fapi.binance.com`) Candlesticks + Auto TP/SL Outcome Tracker</span>
+                    <span>{selectedCoin} • {selectedTimeframe}</span>
+                  </div>
+                  {isChartLoading && (
+                    <div
+                      style={{
+                        position: 'absolute',
+                        top: '28px',
+                        left: 0,
+                        right: 0,
+                        height: '420px',
+                        background: 'rgba(14, 19, 32, 0.78)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        zIndex: 10,
+                        borderRadius: '8px',
+                        color: 'var(--accent-cyan)',
+                        fontSize: '0.85rem',
+                        fontWeight: 600
+                      }}
+                    >
+                      Loading {selectedCoin} ({selectedTimeframe}) Live Candlesticks...
+                    </div>
+                  )}
+                  <div
+                    ref={lwChartContainerRef}
+                    style={{ width: '100%', height: '420px', borderRadius: '8px', overflow: 'hidden', background: '#0e1320' }}
+                  />
+                </div>
+              ) : (
+                <div style={{ width: '100%', height: '420px', borderRadius: '8px', overflow: 'hidden', background: '#0e1320' }}>
+                  <iframe
+                    key={`tv-${selectedCoin}-${selectedTimeframe}`}
+                    title="TradingView Chart"
+                    src={`https://s.tradingview.com/widgetembed/?frameElementId=tradingview_chart&symbol=BINANCE:${selectedCoin}&interval=${selectedTimeframe === '15m' ? '15' : selectedTimeframe === '1h' ? '60' : selectedTimeframe === '4h' ? '240' : 'D'}&hidesidetoolbar=1&symboledit=1&saveimage=0&toolbarbg=f1f3f6&studies=[]&theme=dark&style=1&timezone=Asia%2FKarachi&studies_overrides={}&overrides={}&enabled_features=[]&disabled_features=[]&locale=en`}
+                    style={{ width: '100%', height: '100%', border: 'none' }}
+                  />
+                </div>
+              )}
             </div>
 
             <div className="material-card">
