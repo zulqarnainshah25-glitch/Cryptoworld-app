@@ -184,26 +184,27 @@ describe('5. Semantic Version Comparison & Update Modal Rules', () => {
     return 0;
   };
 
-  it('should NOT trigger update popup when backend version is older than current 1.0.6', () => {
-    const current = '1.0.6';
+  it('should NOT trigger update popup when backend version is older than current 1.0.7', () => {
+    const current = '1.0.7';
     expect(compareVersions('1.0.1', current)).toBeLessThan(0);
     expect(compareVersions('1.0.2', current)).toBeLessThan(0);
     expect(compareVersions('1.0.3', current)).toBeLessThan(0);
     expect(compareVersions('1.0.4', current)).toBeLessThan(0);
     expect(compareVersions('1.0.5', current)).toBeLessThan(0);
-    expect(compareVersions('1.0.5', current) > 0).toBe(false);
+    expect(compareVersions('1.0.6', current)).toBeLessThan(0);
+    expect(compareVersions('1.0.6', current) > 0).toBe(false);
   });
 
-  it('should NOT trigger update popup when backend version is identical to 1.0.6', () => {
-    const current = '1.0.6';
-    const remoteSame = '1.0.6';
+  it('should NOT trigger update popup when backend version is identical to 1.0.7', () => {
+    const current = '1.0.7';
+    const remoteSame = '1.0.7';
     expect(compareVersions(remoteSame, current)).toBe(0);
     expect(compareVersions(remoteSame, current) > 0).toBe(false);
   });
 
-  it('should trigger update popup ONLY when backend version is strictly newer (e.g. 1.0.7 or 1.1.0)', () => {
-    const current = '1.0.6';
-    expect(compareVersions('1.0.7', current)).toBe(1);
+  it('should trigger update popup ONLY when backend version is strictly newer (e.g. 1.0.8 or 1.1.0)', () => {
+    const current = '1.0.7';
+    expect(compareVersions('1.0.8', current)).toBe(1);
     expect(compareVersions('1.1.0', current)).toBe(1);
     expect(compareVersions('2.0.0', current)).toBe(1);
   });
@@ -610,3 +611,75 @@ describe('10. Open-Only Google Sheet Journal Signals & Flicker-Free Chart Kline 
     expect(uniqueSorted[0].close).toBe(82050);
   });
 });
+
+describe('11. Admin Premium Codes Google Sheet Sync & VIP Modal Scroll Rules', () => {
+  const normalizeAdminCode = (c: any) => {
+    const rawPlan = String(c?.plan || c?.planType || c?.PlanType || c?.Plan || 'PRO').toUpperCase().trim();
+    const plan: 'BASIC' | 'PRO' | 'ELITE' =
+      rawPlan === 'BASIC' || rawPlan === 'ELITE' ? rawPlan : 'PRO';
+    const defaultSignals = plan === 'BASIC' ? 5 : plan === 'PRO' ? 10 : 20;
+    const rawUsed = c?.used ?? c?.Used ?? c?.status ?? c?.Status ?? false;
+    const isUsed =
+      rawUsed === true ||
+      String(rawUsed).toUpperCase() === 'TRUE' ||
+      String(rawUsed).toUpperCase() === 'YES' ||
+      String(rawUsed).toUpperCase() === 'USED' ||
+      String(rawUsed).toUpperCase() === 'CLAIMED';
+
+    return {
+      code: String(c?.code || c?.Code || c?.key || '').trim().toUpperCase(),
+      plan,
+      signalsPerDay: Number(c?.signalsPerDay || c?.SignalsPerDay || c?.signals || defaultSignals) || defaultSignals,
+      durationDays: Number(c?.durationDays || c?.DurationDays || c?.duration || c?.days || 30) || 30,
+      used: isUsed,
+      usedBy: c?.usedBy || c?.UsedBy || c?.claimedBy || null,
+      cloudSynced: Boolean(c?.cloudSynced ?? true)
+    };
+  };
+
+  it('should normalize Google Sheet PremiumCodes rows from admin_list_codes accurately', () => {
+    const rawSheetRows = [
+      { Code: 'pro-abcd1234', PlanType: 'PRO', SignalsPerDay: 10, DurationDays: 30, Used: 'FALSE', UsedBy: '' },
+      { code: 'ELITE-9999XXXX', plan: 'elite', signalsPerDay: 20, durationDays: 90, status: 'CLAIMED', usedBy: 'trader1' }
+    ];
+    const normalized = rawSheetRows.map(normalizeAdminCode);
+    expect(normalized[0].code).toBe('PRO-ABCD1234');
+    expect(normalized[0].plan).toBe('PRO');
+    expect(normalized[0].used).toBe(false);
+    expect(normalized[0].cloudSynced).toBe(true);
+
+    expect(normalized[1].code).toBe('ELITE-9999XXXX');
+    expect(normalized[1].plan).toBe('ELITE');
+    expect(normalized[1].durationDays).toBe(90);
+    expect(normalized[1].used).toBe(true);
+    expect(normalized[1].usedBy).toBe('trader1');
+  });
+
+  it('should generate 60 bulk codes (20 BASIC, 20 PRO, 20 ELITE) ready for admin_bulk_generate payload', () => {
+    const plans = [
+      { plan: 'BASIC', signals: 5, count: 20 },
+      { plan: 'PRO', signals: 10, count: 20 },
+      { plan: 'ELITE', signals: 20, count: 20 }
+    ];
+    const newCodes: any[] = [];
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    plans.forEach(p => {
+      for (let i = 0; i < p.count; i++) {
+        let suffix = '';
+        for (let j = 0; j < 8; j++) suffix += chars.charAt(Math.floor(Math.random() * chars.length));
+        newCodes.push({
+          code: `${p.plan}-${suffix}`,
+          plan: p.plan,
+          signalsPerDay: p.signals,
+          durationDays: 30,
+          used: false
+        });
+      }
+    });
+    expect(newCodes.length).toBe(60);
+    expect(newCodes.filter(c => c.plan === 'BASIC').length).toBe(20);
+    expect(newCodes.filter(c => c.plan === 'PRO').length).toBe(20);
+    expect(newCodes.filter(c => c.plan === 'ELITE').length).toBe(20);
+  });
+});
+

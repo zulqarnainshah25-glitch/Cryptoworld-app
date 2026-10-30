@@ -43,7 +43,7 @@ import { createChart, CandlestickSeries, ColorType } from 'lightweight-charts';
 // -------------------------------------------------------------
 // CONFIGURATION & CONSTANTS
 // -------------------------------------------------------------
-const CURRENT_APP_VERSION = '1.0.6';
+const CURRENT_APP_VERSION = '1.0.7';
 
 const compareVersions = (v1: string, v2: string): number => {
   const p1 = (v1 || '').replace(/[^0-9.]/g, '').split('.').map(n => parseInt(n, 10) || 0);
@@ -337,19 +337,17 @@ export default function App() {
   const [adminAuthError, setAdminAuthError] = useState('');
   const [adminAuthLoading, setAdminAuthLoading] = useState(false);
 
-  // VIP Licenses State
+  // VIP Licenses State (Synced with Google Sheet PremiumCodes Tab)
   const [adminCodes, setAdminCodes] = useState<any[]>(() => {
     try {
       const raw = localStorage.getItem(KEYS.CODES);
-      return raw ? JSON.parse(raw) : [
-        { code: 'PRO-TEST2026', plan: 'PRO', signalsPerDay: 10, durationDays: 30, used: false, usedBy: null, createdAt: new Date().toISOString() },
-        { code: 'ELITE-VIP8888', plan: 'ELITE', signalsPerDay: 20, durationDays: 30, used: false, usedBy: null, createdAt: new Date().toISOString() },
-        { code: 'BASIC-FREE555', plan: 'BASIC', signalsPerDay: 5, durationDays: 30, used: false, usedBy: null, createdAt: new Date().toISOString() }
-      ];
+      return raw ? JSON.parse(raw) : [];
     } catch {
       return [];
     }
   });
+  const [adminCodesLoading, setAdminCodesLoading] = useState(false);
+  const [adminCodeGenerating, setAdminCodeGenerating] = useState(false);
   const [adminCodeFilter, setAdminCodeFilter] = useState<'ALL' | 'UNUSED' | 'USED' | 'BASIC' | 'PRO' | 'ELITE'>('ALL');
   const [adminSinglePlan, setAdminSinglePlan] = useState<'BASIC' | 'PRO' | 'ELITE'>('PRO');
   const [adminSingleDuration, setAdminSingleDuration] = useState(30);
@@ -1377,8 +1375,55 @@ export default function App() {
   }, [callBackend]);
 
   // -------------------------------------------------------------
-  // ADMIN PANEL CONTROLLERS (FEATURE 2)
+  // ADMIN PANEL CONTROLLERS (FEATURE 2 - GOOGLE SHEET PREMIUMCODES & USERS SYNC)
   // -------------------------------------------------------------
+  const normalizeAdminCode = useCallback((c: any) => {
+    const rawPlan = String(c?.plan || c?.planType || c?.PlanType || c?.Plan || 'PRO').toUpperCase().trim();
+    const plan: 'BASIC' | 'PRO' | 'ELITE' =
+      rawPlan === 'BASIC' || rawPlan === 'ELITE' ? rawPlan : 'PRO';
+    const defaultSignals = plan === 'BASIC' ? 5 : plan === 'PRO' ? 10 : 20;
+    const rawUsed = c?.used ?? c?.Used ?? c?.status ?? c?.Status ?? false;
+    const isUsed =
+      rawUsed === true ||
+      String(rawUsed).toUpperCase() === 'TRUE' ||
+      String(rawUsed).toUpperCase() === 'YES' ||
+      String(rawUsed).toUpperCase() === 'USED' ||
+      String(rawUsed).toUpperCase() === 'CLAIMED';
+
+    return {
+      code: String(c?.code || c?.Code || c?.key || '').trim().toUpperCase(),
+      plan,
+      signalsPerDay: Number(c?.signalsPerDay || c?.SignalsPerDay || c?.signals || defaultSignals) || defaultSignals,
+      durationDays: Number(c?.durationDays || c?.DurationDays || c?.duration || c?.days || 30) || 30,
+      used: isUsed,
+      usedBy: c?.usedBy || c?.UsedBy || c?.claimedBy || null,
+      createdAt: c?.createdAt || c?.CreatedAt || new Date().toISOString(),
+      cloudSynced: Boolean(c?.cloudSynced ?? true)
+    };
+  }, []);
+
+  const fetchAdminCodes = useCallback(async () => {
+    setAdminCodesLoading(true);
+    const adminToken = localStorage.getItem('cw_admin_token') || '';
+    try {
+      const res = await callBackend('admin_list_codes', { adminToken });
+      const rawList = res?.codes || res?.data || res?.premiumCodes || res?.items;
+      if (res && !res.error && Array.isArray(rawList)) {
+        const sheetCodes = rawList
+          .map((c: any) => normalizeAdminCode({ ...c, cloudSynced: true }))
+          .filter((c: any) => c.code.length > 0);
+        setAdminCodes(sheetCodes);
+        localStorage.setItem(KEYS.CODES, JSON.stringify(sheetCodes));
+        setAdminCodesLoading(false);
+        return sheetCodes;
+      }
+    } catch (e) {
+      console.warn('Error fetching admin codes from Google Sheet:', e);
+    }
+    setAdminCodesLoading(false);
+    return null;
+  }, [callBackend, normalizeAdminCode]);
+
   const fetchAdminUsers = useCallback(async () => {
     setAdminUsersLoading(true);
     const adminToken = localStorage.getItem('cw_admin_token') || '';
@@ -1421,9 +1466,10 @@ export default function App() {
 
   useEffect(() => {
     if (isAdmin && activeTab === 'admin') {
+      fetchAdminCodes();
       fetchAdminUsers();
     }
-  }, [isAdmin, activeTab, fetchAdminUsers]);
+  }, [isAdmin, activeTab, fetchAdminCodes, fetchAdminUsers]);
 
   const handleAdminLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1444,6 +1490,7 @@ export default function App() {
         setActiveTab('admin');
         setAdminInputKey('');
         showToast('Super Admin Dashboard Unlocked!', 'success');
+        fetchAdminCodes();
         fetchAdminUsers();
       } else {
         setAdminAuthError(res?.message || 'Ghalat Master Passphrase! Dastaras radd kar di gayi.');
@@ -1494,7 +1541,9 @@ export default function App() {
     setAdminResetModalMsg('');
   };
 
-  const handleBulkGenerateCodes = () => {
+  const handleBulkGenerateCodes = async () => {
+    if (adminCodeGenerating) return;
+    setAdminCodeGenerating(true);
     const plans = [
       { plan: 'BASIC', signals: 5, count: 20 },
       { plan: 'PRO', signals: 10, count: 20 },
@@ -1513,34 +1562,124 @@ export default function App() {
           durationDays: 30,
           used: false,
           usedBy: null,
-          createdAt: new Date().toISOString()
+          createdAt: new Date().toISOString(),
+          cloudSynced: false
         });
       }
     });
-    const combined = [...newCodes, ...adminCodes];
-    setAdminCodes(combined);
-    localStorage.setItem(KEYS.CODES, JSON.stringify(combined));
-    showToast('Kamyabi! 60 Bulk VIP Codes generate ho gaye.', 'success');
+
+    const adminToken = localStorage.getItem('cw_admin_token') || '';
+    try {
+      const res = await callBackend('admin_bulk_generate', {
+        adminToken,
+        codes: newCodes,
+        countPerPlan: 20,
+        totalCount: 60,
+        durationDays: 30
+      });
+
+      if (res && !res.error) {
+        const backendReturnedList = Array.isArray(res.codes) && res.codes.length > 0
+          ? res.codes.map((c: any) => normalizeAdminCode({ ...c, cloudSynced: true }))
+          : newCodes.map(c => ({ ...c, cloudSynced: true }));
+
+        setAdminCodes(prev => {
+          const existingSet = new Set(backendReturnedList.map((c: any) => c.code));
+          const combined = [...backendReturnedList, ...prev.filter(c => !existingSet.has(c.code))];
+          localStorage.setItem(KEYS.CODES, JSON.stringify(combined));
+          return combined;
+        });
+
+        await fetchAdminCodes();
+        showToast(`✅ Kamyabi! ${backendReturnedList.length} Bulk VIP Codes Google Sheet (PremiumCodes tab) mein save ho gaye!`, 'success');
+      } else {
+        setAdminCodes(prev => {
+          const combined = [...newCodes, ...prev];
+          localStorage.setItem(KEYS.CODES, JSON.stringify(combined));
+          return combined;
+        });
+        showToast(res?.message || '⚠️ Bulk codes local save hue, magar Google Sheet sync fail hua.', 'error');
+      }
+    } catch {
+      setAdminCodes(prev => {
+        const combined = [...newCodes, ...prev];
+        localStorage.setItem(KEYS.CODES, JSON.stringify(combined));
+        return combined;
+      });
+      showToast('⚠️ Google Sheet se rabta nahi ho saka. Bulk codes local save hue.', 'error');
+    } finally {
+      setAdminCodeGenerating(false);
+    }
   };
 
-  const handleSingleGenerateCode = () => {
+  const handleSingleGenerateCode = async () => {
+    if (adminCodeGenerating) return;
+    setAdminCodeGenerating(true);
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     let suffix = '';
     for (let j = 0; j < 8; j++) suffix += chars.charAt(Math.floor(Math.random() * chars.length));
     const sigs = adminSinglePlan === 'BASIC' ? 5 : adminSinglePlan === 'PRO' ? 10 : 20;
+    const duration = Number(adminSingleDuration) || 30;
     const codeObj = {
       code: `${adminSinglePlan}-${suffix}`,
       plan: adminSinglePlan,
       signalsPerDay: sigs,
-      durationDays: Number(adminSingleDuration) || 30,
+      durationDays: duration,
       used: false,
       usedBy: null,
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      cloudSynced: false
     };
-    const combined = [codeObj, ...adminCodes];
-    setAdminCodes(combined);
-    localStorage.setItem(KEYS.CODES, JSON.stringify(combined));
-    showToast(`VIP License Key tayyar hai: ${codeObj.code}`, 'success');
+
+    const adminToken = localStorage.getItem('cw_admin_token') || '';
+    try {
+      const res = await callBackend('admin_generate_single', {
+        adminToken,
+        code: codeObj.code,
+        plan: codeObj.plan,
+        planType: codeObj.plan,
+        signalsPerDay: codeObj.signalsPerDay,
+        durationDays: codeObj.durationDays,
+        duration: codeObj.durationDays,
+        days: codeObj.durationDays
+      });
+
+      if (res && !res.error) {
+        const returnedCodeObj =
+          res.code && typeof res.code === 'object'
+            ? normalizeAdminCode({ ...codeObj, ...res.code, cloudSynced: true })
+            : normalizeAdminCode({
+                ...codeObj,
+                code: typeof res.code === 'string' && res.code.trim() ? res.code.trim().toUpperCase() : codeObj.code,
+                cloudSynced: true
+              });
+
+        setAdminCodes(prev => {
+          const combined = [returnedCodeObj, ...prev.filter(c => c.code !== returnedCodeObj.code)];
+          localStorage.setItem(KEYS.CODES, JSON.stringify(combined));
+          return combined;
+        });
+
+        await fetchAdminCodes();
+        showToast(`✅ VIP License Key Google Sheet (PremiumCodes tab) mein save ho gayi: ${returnedCodeObj.code}`, 'success');
+      } else {
+        setAdminCodes(prev => {
+          const combined = [codeObj, ...prev];
+          localStorage.setItem(KEYS.CODES, JSON.stringify(combined));
+          return combined;
+        });
+        showToast(res?.message || `⚠️ Key local save hui (${codeObj.code}), magar Google Sheet sync fail hua.`, 'error');
+      }
+    } catch {
+      setAdminCodes(prev => {
+        const combined = [codeObj, ...prev];
+        localStorage.setItem(KEYS.CODES, JSON.stringify(combined));
+        return combined;
+      });
+      showToast(`⚠️ Google Sheet se rabta nahi ho saka. Key local save hui: ${codeObj.code}`, 'error');
+    } finally {
+      setAdminCodeGenerating(false);
+    }
   };
 
   const handleCopyUnusedCodes = () => {
@@ -1562,7 +1701,7 @@ export default function App() {
     }
     setAdminCodes(unused);
     localStorage.setItem(KEYS.CODES, JSON.stringify(unused));
-    showToast(`${purged} used codes database se clean ho gaye.`, 'success');
+    showToast(`${purged} used codes list se clean ho gaye.`, 'success');
   };
 
   const handleSaveAdConfig = () => {
@@ -2625,20 +2764,34 @@ export default function App() {
     try {
       const codeClean = redeemCode.trim().toUpperCase();
       const res = await callBackend('redeem_premium_code', { username: user.username, code: codeClean });
-      if (res && res.success) {
-        const plan = (res.planType || 'BASIC').toUpperCase() as any;
-        const newQuota = PLAN_LIMITS[plan] || Number(res.signalsPerDay) || 5;
-        const updatedUser: UserProfile = { ...user, plan, planBaseQuota: newQuota, dailyQuotaLeft: newQuota, isSheetVerified: true };
+      if (res && (res.success || (!res.error && (res.planType || res.plan)))) {
+        const plan = String(res.planType || res.plan || 'BASIC').toUpperCase() as any;
+        const newQuota = Number(res.signalsPerDay) || PLAN_LIMITS[plan] || 5;
+        const updatedUser: UserProfile = {
+          ...user,
+          plan,
+          planBaseQuota: newQuota,
+          dailyQuotaLeft: res.signalsLeft !== undefined ? Number(res.signalsLeft) : newQuota,
+          isSheetVerified: true
+        };
         setUser(updatedUser);
         const rawDb = localStorage.getItem(KEYS.USERS_DB);
         const db = rawDb ? JSON.parse(rawDb) : {};
         db[user.username] = updatedUser;
         localStorage.setItem(KEYS.USERS_DB, JSON.stringify(db));
+
+        setAdminCodes(prev => {
+          const next = prev.map(c => c.code === codeClean ? { ...c, used: true, usedBy: user.username } : c);
+          localStorage.setItem(KEYS.CODES, JSON.stringify(next));
+          return next;
+        });
+
         setRedeemCode('');
         setPremiumModalOpen(false);
+        verifyAndSyncWithGoogleSheet(user.username);
         showToast(`Mubarak! ${plan} Plan Google Sheet mein active ho gaya (${newQuota} signals/day)!`, 'success');
       } else {
-        showToast(res.message || 'Ghalat ya Naqabil-e-amal VIP Code!', 'error');
+        showToast(res?.message || 'Ghalat ya Naqabil-e-amal VIP Code!', 'error');
       }
     } catch {
       showToast('Code verify karne mein kharabi hui.', 'error');
@@ -4231,10 +4384,13 @@ export default function App() {
                   <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
                     <button
                       className="btn-secondary"
-                      onClick={fetchAdminUsers}
+                      onClick={() => {
+                        fetchAdminCodes();
+                        fetchAdminUsers();
+                      }}
                       style={{ fontSize: '0.78rem', padding: '6px 12px', display: 'flex', alignItems: 'center', gap: '6px' }}
                     >
-                      <RefreshCw size={13} className={adminUsersLoading ? 'spin' : ''} />
+                      <RefreshCw size={13} className={(adminUsersLoading || adminCodesLoading) ? 'spin' : ''} />
                       <span>Sync Sheet</span>
                     </button>
                     <button
@@ -4282,7 +4438,7 @@ export default function App() {
                     {/* Stat Badges */}
                     <div className="plans-grid" style={{ marginBottom: '16px' }}>
                       <div className="material-card" style={{ padding: '16px', textAlign: 'center' }}>
-                        <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>Total Generated</div>
+                        <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>Total Generated (Sheet)</div>
                         <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#fff', marginTop: '4px' }}>{adminCodes.length}</div>
                       </div>
                       <div className="material-card" style={{ padding: '16px', textAlign: 'center' }}>
@@ -4303,22 +4459,23 @@ export default function App() {
                     <div className="material-card" style={{ marginBottom: '20px', padding: '20px' }}>
                       <h3 style={{ margin: '0 0 14px', fontSize: '1.05rem', color: 'var(--accent-cyan)', display: 'flex', alignItems: 'center', gap: '8px' }}>
                         <Ticket size={18} />
-                        <span>VIP License Key Generator</span>
+                        <span>VIP License Key Generator (Direct Google Sheet Sync)</span>
                       </h3>
                       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '16px' }}>
                         {/* Bulk Generator */}
                         <div style={{ background: '#0e1424', padding: '16px', borderRadius: '10px', border: '1px solid var(--border-color)' }}>
                           <h4 style={{ margin: '0 0 8px', fontSize: '0.95rem', color: '#fff' }}>⚡ 1-Click 60 Bulk Codes</h4>
                           <p style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', margin: '0 0 12px', lineHeight: 1.4 }}>
-                            20 Basic (5 sigs) + 20 Pro (10 sigs) + 20 Elite (20 sigs) ek click mein generate karein.
+                            20 Basic (5 sigs) + 20 Pro (10 sigs) + 20 Elite (20 sigs) ek click mein generate karke Google Sheet (PremiumCodes tab) mein save karein.
                           </p>
                           <button
                             type="button"
                             className="btn-primary"
                             style={{ width: '100%', fontSize: '0.85rem', padding: '10px' }}
                             onClick={handleBulkGenerateCodes}
+                            disabled={adminCodeGenerating}
                           >
-                            Generate 60 Bulk Codes
+                            {adminCodeGenerating ? 'Saving to Google Sheet...' : 'Generate 60 Bulk Codes'}
                           </button>
                         </div>
 
@@ -4359,8 +4516,9 @@ export default function App() {
                             className="btn-secondary"
                             style={{ width: '100%', fontSize: '0.85rem', padding: '8px', borderColor: 'var(--accent-cyan)', color: 'var(--accent-cyan)' }}
                             onClick={handleSingleGenerateCode}
+                            disabled={adminCodeGenerating}
                           >
-                            + Generate Single Key
+                            {adminCodeGenerating ? 'Saving to Google Sheet...' : '+ Generate Single Key'}
                           </button>
                         </div>
                       </div>
@@ -4387,7 +4545,11 @@ export default function App() {
                           ))}
                         </div>
 
-                        <div style={{ display: 'flex', gap: '8px' }}>
+                        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                          <button className="btn-secondary" style={{ fontSize: '0.75rem', padding: '4px 8px' }} onClick={fetchAdminCodes} disabled={adminCodesLoading}>
+                            <RefreshCw size={12} className={adminCodesLoading ? 'spin' : ''} style={{ marginRight: '4px' }} />
+                            {adminCodesLoading ? 'Loading Sheet...' : 'Reload Sheet Codes'}
+                          </button>
                           <button className="btn-secondary" style={{ fontSize: '0.75rem', padding: '4px 8px' }} onClick={handleCopyUnusedCodes}>
                             <Copy size={12} style={{ marginRight: '4px' }} />
                             Copy Unused
@@ -4864,17 +5026,28 @@ export default function App() {
         </div>
       )}
 
-      {/* Premium Plans Modal (Direct Google Sheet Sync) */}
+      {/* Premium Plans Modal (Direct Google Sheet Sync & Mobile Scrollable) */}
       {premiumModalOpen && (
         <div className="modal-overlay active">
-          <div className="modal-card material-card" style={{ maxWidth: '650px' }}>
+          <div
+            className="modal-card material-card vip-modal-card max-h-[90vh] overflow-y-auto"
+            style={{
+              maxWidth: '650px',
+              maxHeight: '90vh',
+              overflowY: 'auto',
+              overflowX: 'hidden',
+              WebkitOverflowScrolling: 'touch'
+            }}
+          >
             <button className="modal-close-btn" onClick={() => setPremiumModalOpen(false)}>×</button>
-            <h2 className="card-title" style={{ color: 'var(--accent-cyan)' }}>⭐ Upgrade to VIP Signals (Google Sheet Sync)</h2>
-            <p style={{ color: 'var(--text-secondary)', fontSize: '0.88rem', marginBottom: '18px' }}>
+            <h2 className="card-title" style={{ color: 'var(--accent-cyan)', paddingRight: '28px' }}>
+              ⭐ Upgrade to VIP Signals (Google Sheet Sync)
+            </h2>
+            <p style={{ color: 'var(--text-secondary)', fontSize: '0.86rem', marginBottom: '16px' }}>
               Rozana zyada signals, zero waiting, aur direct WhatsApp VIP group signals haasil karein.
             </p>
 
-            <div className="plans-grid">
+            <div className="plans-grid vip-plans-grid">
               <div className="plan-card">
                 <div className="plan-name">BASIC</div>
                 <div className="plan-signals">5 Signals/Day</div>
@@ -4919,18 +5092,20 @@ export default function App() {
               </div>
             </div>
 
-            <div style={{ background: '#111624', border: '1px solid var(--border-color)', borderRadius: '10px', padding: '14px', marginTop: '16px' }}>
-              <label className="form-label">🎟️ Redeem Premium License Code</label>
-              <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+            <div className="vip-redeem-box" style={{ background: '#111624', border: '1px solid var(--border-color)', borderRadius: '10px', padding: '14px', marginTop: '14px', marginBottom: '4px' }}>
+              <label className="form-label" style={{ marginBottom: '8px', color: '#fff', fontWeight: 700 }}>
+                🎟️ Redeem Premium License Code
+              </label>
+              <div className="vip-redeem-row" style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
                 <input
                   type="text"
                   className="form-input"
                   style={{ flex: 1, minWidth: '180px', textTransform: 'uppercase' }}
-                  placeholder="e.g. PRO-TEST2026"
+                  placeholder="e.g. PRO-XXXXYYYY"
                   value={redeemCode}
                   onChange={e => setRedeemCode(e.target.value)}
                 />
-                <button className="btn-primary" onClick={handleRedeemCode}>
+                <button type="button" className="btn-primary" onClick={handleRedeemCode}>
                   ✔ Redeem Code
                 </button>
               </div>
